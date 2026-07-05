@@ -32,9 +32,13 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.73"
+APP_VERSION = "0.1.77"
 
 CHANGELOG = [
+    "0.1.77: Set post-global-coordinate rgl camera from explicit screen-axis basis: x diagonal down-right, y diagonal up-right, z upward, with perspective.",
+    "0.1.76: Adjusted post-global-coordinate rgl camera to x/y diagonal, z-up perspective view.",
+    "0.1.75: Standardized the rgl camera for post-global-coordinate 05B/05C QC views.",
+    "0.1.74: Restored eye-wise 05B/05C QC buttons to single-eye plotting; only combined buttons plot both eyes.",
     "0.1.73: Updated the default GitHub repository to Pete-s-Lab/CV3D while keeping the R package namespace CompoundVision3D.",
     "0.1.72: Results/Export now reports the absolute export folder and creates the QC PDF without requiring matplotlib.",
     "0.1.71: Rebuilds workflow/R Analysis states from existing on-disk outputs when loading recovered or stale datasets.",
@@ -1952,9 +1956,9 @@ class CV3DMainWindow(QMainWindow):
         combined_box = QGroupBox("Combined two-eye QC plots")
         combined_layout = QVBoxLayout(combined_box)
         self.r_analysis_combined_05b_btn = QPushButton("Plot 05B global-alignment QC: both eyes")
-        self.r_analysis_combined_05b_btn.clicked.connect(lambda: self.plot_05b_qc_outputs(self.preferred_eye_for_combined_qc()))
+        self.r_analysis_combined_05b_btn.clicked.connect(lambda: self.plot_05b_qc_outputs(self.preferred_eye_for_combined_qc(), combined=True))
         self.r_analysis_combined_05c_btn = QPushButton("Plot 05C corneal-projection QC: both eyes")
-        self.r_analysis_combined_05c_btn.clicked.connect(lambda: self.plot_05c_qc_outputs(self.preferred_eye_for_combined_qc()))
+        self.r_analysis_combined_05c_btn.clicked.connect(lambda: self.plot_05c_qc_outputs(self.preferred_eye_for_combined_qc(), combined=True))
         combined_layout.addWidget(self.r_analysis_combined_05b_btn)
         combined_layout.addWidget(self.r_analysis_combined_05c_btn)
         layout.addWidget(combined_box)
@@ -6875,7 +6879,7 @@ class CV3DMainWindow(QMainWindow):
                 ordered.append(e)
         return ordered
 
-    def plot_05b_qc_outputs(self, eye: str) -> None:
+    def plot_05b_qc_outputs(self, eye: str, combined: bool = False) -> None:
         if not self.ensure_eye_and_dataset(eye):
             return
 
@@ -6905,7 +6909,8 @@ class CV3DMainWindow(QMainWindow):
             self.refresh_all()
             return
 
-        for candidate in self.gather_available_primary_eyes_for_combined_qc(eye):
+        candidate_eyes = self.gather_available_primary_eyes_for_combined_qc(eye) if combined else [eye]
+        for candidate in candidate_eyes:
             files = self.config["eyes"].get(candidate, {}).get("files", {})
             global_rel = files.get("global_coordinates_file")
             referenced_rel = files.get("landmark_referenced_coordinates_file")
@@ -6932,7 +6937,8 @@ class CV3DMainWindow(QMainWindow):
                 missing_details.append(f"{candidate}: missing " + ", ".join(missing))
 
         if len(eyes_to_plot) == 0:
-            QMessageBox.warning(self, "05B outputs missing", "Could not find usable 05B outputs for eye1 or eye2.\n\n" + "\n".join(missing_details))
+            context = "eye1 or eye2" if combined else eye
+            QMessageBox.warning(self, "05B outputs missing", f"Could not find usable 05B outputs for {context}.\n\n" + "\n".join(missing_details))
             self.refresh_all()
             return
 
@@ -6950,14 +6956,15 @@ class CV3DMainWindow(QMainWindow):
 
         task_prefix = "05BP"
         label = "05B global-alignment QC plot"
-        output_png_rel = eye_inspection_rel_path(eye, f"05B_{cv_id}_{eye}_global_alignment_qc.png")
-        output_reference_png_rel = eye_inspection_rel_path(eye, f"05B_{cv_id}_{eye}_landmark_reference_qc.png")
+        output_eye_tag = "both_eyes" if combined and len(eyes_to_plot) > 1 else eye
+        output_png_rel = eye_inspection_rel_path(eye, f"05B_{cv_id}_{output_eye_tag}_global_alignment_qc.png")
+        output_reference_png_rel = eye_inspection_rel_path(eye, f"05B_{cv_id}_{output_eye_tag}_landmark_reference_qc.png")
 
-        task_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_task.json")
-        status_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_status.json")
-        stdout_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_stdout.log")
-        stderr_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_stderr.log")
-        launch_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_launch_command.txt")
+        task_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_task.json")
+        status_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_status.json")
+        stdout_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_stdout.log")
+        stderr_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_stderr.log")
+        launch_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_launch_command.txt")
 
         task = {
             "task_type": "05B_qc_plot",
@@ -7037,7 +7044,7 @@ class CV3DMainWindow(QMainWindow):
                 details.append(status_message)
             QMessageBox.warning(self, f"{label} failed", f"The {label} was not created successfully.\n\n" + "\n".join(details))
 
-    def plot_05c_qc_outputs(self, eye: str) -> None:
+    def plot_05c_qc_outputs(self, eye: str, combined: bool = False) -> None:
         if not self.ensure_eye_and_dataset(eye):
             return
 
@@ -7060,7 +7067,8 @@ class CV3DMainWindow(QMainWindow):
         cv_id = self.config["dataset_identity"]["cv_id"]
         eyes_to_plot = []
         missing_details = []
-        for candidate in self.gather_available_primary_eyes_for_combined_qc(eye):
+        candidate_eyes = self.gather_available_primary_eyes_for_combined_qc(eye) if combined else [eye]
+        for candidate in candidate_eyes:
             files = self.config["eyes"].get(candidate, {}).get("files", {})
             global_rel = files.get("global_coordinates_file")
             projection_rel = files.get("corneal_projections_file")
@@ -7083,7 +7091,8 @@ class CV3DMainWindow(QMainWindow):
                 missing_details.append(f"{candidate}: missing " + ", ".join(missing))
 
         if len(eyes_to_plot) == 0:
-            QMessageBox.warning(self, "05C outputs missing", "Could not find usable 05B/05C outputs for eye1 or eye2.\n\n" + "\n".join(missing_details))
+            context = "eye1 or eye2" if combined else eye
+            QMessageBox.warning(self, "05C outputs missing", f"Could not find usable 05B/05C outputs for {context}.\n\n" + "\n".join(missing_details))
             self.refresh_all()
             return
 
@@ -7101,18 +7110,19 @@ class CV3DMainWindow(QMainWindow):
 
         task_prefix = "05CP"
         label = "05C corneal-projection QC plots"
+        output_eye_tag = "both_eyes" if combined and len(eyes_to_plot) > 1 else eye
         output_pngs = {
-            axis: str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{eye}_corneal_projection_{axis}.png"))
+            axis: str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_{axis}.png"))
             for axis in ["front", "back", "left", "right", "top", "bottom"]
         }
-        output_pngs["latlon"] = str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{eye}_corneal_projection_latlon.png"))
-        output_pngs["rgl_3d"] = str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{eye}_corneal_projection_3d_qc.png"))
+        output_pngs["latlon"] = str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_latlon.png"))
+        output_pngs["rgl_3d"] = str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_3d_qc.png"))
 
-        task_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_task.json")
-        status_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_status.json")
-        stdout_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_stdout.log")
-        stderr_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_stderr.log")
-        launch_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_launch_command.txt")
+        task_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_task.json")
+        status_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_status.json")
+        stdout_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_stdout.log")
+        stderr_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_stderr.log")
+        launch_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_launch_command.txt")
 
         task = {
             "task_type": "05C_qc_plot",
@@ -7123,7 +7133,7 @@ class CV3DMainWindow(QMainWindow):
             "analysis_folder": str(self.analysis_folder),
             "input_eyes": eyes_to_plot,
             "output_plot_pngs_abs": output_pngs,
-            "output_plot_png": eye_inspection_rel_path(eye, f"05C_{cv_id}_{eye}_corneal_projection_3d_qc.png"),
+            "output_plot_png": eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_3d_qc.png"),
             "output_plot_png_abs": output_pngs["rgl_3d"],
             "open_rgl_window": open_rgl_window,
             "make_rgl_snapshot": False,

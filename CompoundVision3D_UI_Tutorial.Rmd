@@ -169,8 +169,10 @@ Install/update from GitHub
 The default GitHub repository is:
 
 ```text
-Pete-s-Lab/CompoundVision3D
+Pete-s-Lab/CV3D
 ```
+
+The GitHub repository is now named `CV3D`; the installed R package namespace is still `CompoundVision3D` unless the package itself is renamed later.
 
 ```{r fig-04-settings-page, fig.cap="Settings page. Only executable paths usually need to be set manually; helper scripts can be loaded from the bundled folder.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/settings_page.png")

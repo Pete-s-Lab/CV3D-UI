@@ -16,7 +16,7 @@ safe_require("dplyr")
 safe_require("viridisLite")
 safe_require("rgl")
 
-SCRIPT_VERSION <- "0.1.3-combined-two-eye-qc"
+SCRIPT_VERSION <- "0.1.8-lower-side-view-corrected"
 SCRIPT_NAME <- "CV3D_R_05B_QC_plots.R"
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
@@ -250,6 +250,30 @@ wait_for_rgl_close <- function() {
   }
 }
 
+set_cv3d_global_rgl_view <- function() {
+  # Standard post-05B/05C global-coordinate camera.
+  # The camera basis is set explicitly from the desired screen-axis layout:
+  # x_global projects diagonally upper-left <-> lower-right,
+  # y_global projects diagonally lower-left <-> upper-right,
+  # z_global projects upward. Corrected view-direction sign: visually lower the camera relative to the object instead of moving it upward. Dimensions remain iso; FOV keeps normal perspective.
+  screen_right <- c(1, 1, 0) / sqrt(2)
+  screen_up <- c(-1, 1, 2.41421356)
+  screen_up <- screen_up / sqrt(sum(screen_up^2))
+  screen_forward <- c(
+    screen_right[2] * screen_up[3] - screen_right[3] * screen_up[2],
+    screen_right[3] * screen_up[1] - screen_right[1] * screen_up[3],
+    screen_right[1] * screen_up[2] - screen_right[2] * screen_up[1]
+  )
+  screen_forward <- screen_forward / sqrt(sum(screen_forward^2))
+  user_matrix <- matrix(c(
+    screen_right[1],   screen_right[2],   screen_right[3],   0,
+    screen_up[1],      screen_up[2],      screen_up[3],      0,
+    screen_forward[1], screen_forward[2], screen_forward[3], 0,
+    0,                 0,                 0,                 1
+  ), nrow = 4, byrow = TRUE)
+  try(rgl::par3d(userMatrix = user_matrix, FOV = 35, zoom = 0.78), silent = TRUE)
+}
+
 open_alignment_rgl <- function(pointcloud, cv_id, eye) {
   pcs <- split_pointcloud(pointcloud, "_global", "05B global aligned point-cloud")
   facets <- pcs$facets
@@ -261,6 +285,7 @@ open_alignment_rgl <- function(pointcloud, cv_id, eye) {
   z_offset <- landmark_radius * 2.0
 
   rgl::open3d(windowRect = c(80, 80, 1800, 1400))
+  rgl::bg3d(color = "white")
   rgl::plot3d(facets$x_global, facets$y_global, facets$z_global,
               type = "n",
               xlab = "x_global", ylab = "y_global", zlab = "z_global",
@@ -275,6 +300,7 @@ open_alignment_rgl <- function(pointcloud, cv_id, eye) {
   rgl::texts3d(landmarks$x_global, landmarks$y_global, landmarks$z_global + z_offset,
                texts = as.character(landmarks$landmark), cex = 0.9, color = "blue")
   rgl::title3d(main = sprintf("%s %s - 05B global alignment QC", cv_id, eye))
+  set_cv3d_global_rgl_view()
   wait_for_rgl_close()
 }
 

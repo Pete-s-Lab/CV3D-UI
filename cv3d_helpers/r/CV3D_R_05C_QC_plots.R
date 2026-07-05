@@ -16,7 +16,7 @@ safe_require("dplyr")
 safe_require("viridisLite")
 safe_require("rgl")
 
-SCRIPT_VERSION <- "0.1.2-combined-two-eye-qc"
+SCRIPT_VERSION <- "0.1.7-lower-side-view-corrected"
 SCRIPT_NAME <- "CV3D_R_05C_QC_plots.R"
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
@@ -295,6 +295,30 @@ wait_for_rgl_close <- function() {
   }
 }
 
+set_cv3d_global_rgl_view <- function() {
+  # Standard post-05B/05C global-coordinate camera.
+  # The camera basis is set explicitly from the desired screen-axis layout:
+  # x_global projects diagonally upper-left <-> lower-right,
+  # y_global projects diagonally lower-left <-> upper-right,
+  # z_global projects upward. Corrected view-direction sign: visually lower the camera relative to the object instead of moving it upward. Dimensions remain iso; FOV keeps normal perspective.
+  screen_right <- c(1, 1, 0) / sqrt(2)
+  screen_up <- c(-1, 1, 2.41421356)
+  screen_up <- screen_up / sqrt(sum(screen_up^2))
+  screen_forward <- c(
+    screen_right[2] * screen_up[3] - screen_right[3] * screen_up[2],
+    screen_right[3] * screen_up[1] - screen_right[1] * screen_up[3],
+    screen_right[1] * screen_up[2] - screen_right[2] * screen_up[1]
+  )
+  screen_forward <- screen_forward / sqrt(sum(screen_forward^2))
+  user_matrix <- matrix(c(
+    screen_right[1],   screen_right[2],   screen_right[3],   0,
+    screen_up[1],      screen_up[2],      screen_up[3],      0,
+    screen_forward[1], screen_forward[2], screen_forward[3], 0,
+    0,                 0,                 0,                 1
+  ), nrow = 4, byrow = TRUE)
+  try(rgl::par3d(userMatrix = user_matrix, FOV = 35, zoom = 0.78), silent = TRUE)
+}
+
 snapshot_rgl <- function(path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   ok <- FALSE
@@ -383,7 +407,7 @@ render_rgl_scene <- function(df, path, cv_id, eye, keep_open = FALSE, make_snaps
     rgl::points3d(center_i[1], center_i[2], center_i[3], size = 8, col = "blue")
   }
   rgl::title3d(main = sprintf("%s %s - 05C corneal projection QC", cv_id, eye))
-  rgl::view3d(theta = 35, phi = 20, zoom = 0.78)
+  set_cv3d_global_rgl_view()
   snapshot_status <- "not_requested"
   if (isTRUE(make_snapshot) && !is.null(path) && nzchar(path)) {
     snapshot_status <- tryCatch({
