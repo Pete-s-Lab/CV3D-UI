@@ -1,6 +1,6 @@
 ---
-title: "CV3D (aka CompoundVision3D) UI Tutorial"
-subtitle: "Pre-release workflow guide for image-volume based compound-eye analysis"
+title: "CV3D (CompoundVision3D) UI Tutorial"
+subtitle: "Workflow guide for image-volume based compound-eye analysis"
 author: "Peter T. Rühr"
 date: "`r Sys.Date()`"
 output:
@@ -19,16 +19,16 @@ header-includes:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
-This tutorial describes the current CompoundVision3D UI workflow from raw image-volume data to checked facet positions, head landmarks, optical metrics, corneal projections, mirroring, and analysis-ready export. It is written for external beta testers using the bundled pre-release application.
+This tutorial describes the current CV3D UI workflow from raw image-volume data to checked facet positions, head landmarks, optical metrics, corneal projections, mirroring, and analysis-ready export. It is written for external beta testers using the bundled application.
 
-> **Current scope**  
-> This guide focuses on the image-volume workflow using Fiji/ImageJ, Blender, R, and the CompoundVision3D R package. STL-source datasets are mentioned briefly, but the main tutorial assumes that the dataset starts from an image stack or volume.
+> **Scope**  
+> This guide focuses on the image-volume workflow using Fiji/ImageJ, Blender, R, and the CV3D R package. STL-source datasets are mentioned briefly, but the main tutorial assumes that the dataset starts from an image stack or volume.
 
 ---
 
 # Overview
 
-CompoundVision3D is an interactive workflow for extracting compound-eye surface information from 3D image data. The current UI coordinates several tools:
+CV3D is an interactive workflow for extracting compound-eye surface information from 3D image data. The current UI coordinates several tools:
 
 - **Fiji/ImageJ** for image-volume preprocessing and STL extraction.
 - **Blender** for manual cornea extraction, facet-position checking, and head landmarking.
@@ -54,7 +54,7 @@ Raw image volume
 -> Results / Export: analysis-ready tables and QC report
 ```
 
-```{r fig-01-workflow-overview, fig.cap="Overview of the CompoundVision3D workflow from raw image data to analysis-ready compound-eye outputs.", out.width="66%", fig.align="center", fig.pos="H"}
+```{r fig-01-workflow-overview, fig.cap="Overview of the CV3D workflow from raw image data to analysis-ready compound-eye outputs.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/workflow_overview.png")
 ```
 ---
@@ -86,12 +86,12 @@ For Fiji/ImageJ, the current mesh extraction workflow uses the **3D Viewer** for
 
 ---
 
-# Folder structure of the pre-release bundle
+# Folder structure of the CV3D UI
 
-The pre-release bundle should look like this:
+The CV3D UI should look like this:
 
 ```text
-CompoundVision3D_UI_prerelease/
+CV3D_UI/
 |--- CV3D_app.py
 |--- README.md
 |--- cv3d_helpers/
@@ -123,7 +123,7 @@ Only `CV3D_app.py` needs to be started directly. The helper scripts are detected
 
 # Starting the app
 
-Open a terminal in the `CompoundVision3D_UI_prerelease/` folder and run:
+Open a terminal in the `CV3D_UI/` folder and run:
 
 ```bash
 python CV3D_app.py
@@ -131,7 +131,7 @@ python CV3D_app.py
 
 The app opens with the left navigation panel and the main workflow area.
 
-```{r fig-03-start-screen, fig.cap="Start screen of the CompoundVision3D UI.", out.width="66%", fig.align="center", fig.pos="H"}
+```{r fig-03-start-screen, fig.cap="Start screen of the CV3D UI.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/start_screen.png")
 ```
 ---
@@ -197,7 +197,7 @@ CV3D_project_registry.json
 
 This registry stores all datasets in the current project.
 
-```{r fig-05-project-manager, fig.cap="Project Manager page after opening a CompoundVision3D project folder.", out.width="66%", fig.align="center", fig.pos="H"}
+```{r fig-05-project-manager, fig.cap="Project Manager page after opening a CV3D project folder.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/project_manager.png")
 ```
 ---
@@ -250,7 +250,7 @@ The current image-volume workflow normally uses:
 source_type = image_volume
 ```
 
-Mark only eyes that are present in the dataset. The workflow buttons for absent eyes should remain disabled.
+Mark only eyes that are present in the dataset. The workflow buttons for absent eyes remain disabled.
 
 Click:
 
@@ -284,7 +284,7 @@ CVxxxx_CV3D/eye1/01_CVxxxx_eye1.nrrd
 CVxxxx_CV3D/eye2/01_CVxxxx_eye2.nrrd
 ```
 
-During ROI selection, if no rectangular ROI is selected, the macro should ask again instead of aborting.
+If no rectangular ROI is selected, the macro prompts for ROI selection again.
 
 ```{r fig-08-imagej-preprocessing-roi, fig.cap="ImageJ preprocessing. The user selects head and eye ROIs interactively.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/imagej_preprocessing_roi.png")
@@ -321,7 +321,7 @@ CVxxxx_CV3D/eye1/01_CVxxxx_eye1_ImageJ.stl
 CVxxxx_CV3D/eye2/01_CVxxxx_eye2_ImageJ.stl
 ```
 
-Status and logs should be written into `json/` and `logs/` folders, not mixed with scientific outputs.
+Status files and logs are written into `json/` and `logs/` folders, not mixed with scientific outputs.
 
 For example:
 
@@ -350,7 +350,7 @@ Check ImageJ/source outputs
 
 The app checks whether expected source files exist. This check is intentionally lightweight for large STL files. It checks existence and file size rather than parsing the full STL.
 
-The report should show whether the following files exist:
+The report lists whether the following files exist:
 
 - head NRRD
 - head STL
@@ -392,7 +392,7 @@ CVxxxx_CV3D/eyeX/json/02_CVxxxx_eyeX_Blender_task.json
 CVxxxx_CV3D/eyeX/json/02_CVxxxx_eyeX_Blender_status.json
 ```
 
-If an existing Blender file is found, the app should warn before overwriting. The safest option is usually:
+If an existing Blender file is found, the app warns before overwriting. To continue without replacing previous work, choose:
 
 ```text
 Open existing and continue
@@ -500,7 +500,7 @@ CVxxxx_CV3D/eyeX/03_CVxxxx_eyeX_local_height_thresholded.csv
 CVxxxx_CV3D/eyeX/inspection/03B_CVxxxx_eyeX_local_height.png
 ```
 
-```{r fig-17-threshold-preview, fig.cap="Local-height threshold preview. The final threshold is chosen after inspecting this plot. Here, we will choose thresold = 9 as it separates facet peaks from the valleys around the facets.", out.width="100%", fig.align="center", fig.pos="H"}
+```{r fig-17-threshold-preview, fig.cap="Local-height threshold preview. In this example, a threshold of 9 separates facet peaks from the surrounding valleys.", out.width="100%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/threshold_preview.png")
 ```
 ```{r fig-18-thresholded-points, fig.cap="Final thresholded local-height points after Step 03B.", out.width="50%", fig.align="center", fig.pos="H"}
@@ -637,7 +637,7 @@ minimum group size = 3
 candidate point selection = nearest mode point
 ```
 
-```{r fig-19-facet-candidate-condensation, fig.cap="Parameter dialog for Step 03C facet candidate condensation. Note we rudeuced the mimnimum group size to 1 to reflect the rather strict thresholding of Step 03B.", out.width="40%", fig.align="center", fig.pos="H"}
+```{r fig-19-facet-candidate-condensation, fig.cap="Parameter dialog for Step 03C facet candidate condensation. In this example, the minimum group size is set to 1 because strict thresholding leaves relatively few points per facet.", out.width="40%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/facet_candidate_condensation.png")
 ```
 
@@ -669,7 +669,7 @@ Plot facet candidates on local heights: eyeX
 Plot facet positions on local heights: eyeX
 ```
 
-The newer candidate/position overlay plots automatically choose the 2D projection with the largest spread. This avoids forcing a bad projection when the eye is tilted.
+Candidate/position overlay plots automatically choose the 2D projection with the largest spread. This avoids forcing a bad projection when the eye is tilted.
 
 The static PNGs are saved in the background and are not automatically opened. Where available, the app asks whether to also open an interactive `rgl` 3D window.
 
@@ -748,7 +748,7 @@ CV3D_head_mesh
 
 The head mesh is visible, selectable, and locked in location, rotation, and scale to reduce accidental movement.
 
-Hardcoded landmarks are:
+The required landmarks are:
 
 ```text
 anterior
@@ -775,7 +775,7 @@ knitr::include_graphics("docs/images/head_landmarking.png")
 
 After Step 05, go to the **R Analysis** tab. This tab contains the downstream steps that turn checked facet positions and head landmarks into optical and spatial output tables.
 
-The eye-wise sections show available steps for each eye. Completed real-eye steps use the normal completion symbol. Steps derived by mirroring are marked with:
+The eye-wise sections show available steps for each eye. Steps calculated from original eye data use the normal completion symbol. Steps derived from a mirrored source eye are marked with:
 
 \(\rightleftarrows\)
 
@@ -851,7 +851,7 @@ knitr::include_graphics("docs/images/r_analysis_05b_outputs_3D.png")
 
 Step 05C projects the globally aligned facet points onto a projection sphere and writes latitude/longitude coordinates. These outputs make the compound eye spatially interpretable in a standardized two-dimensional angular coordinate system.
 
-Click the 05C button for the relevant eye. The current default projection centre is:
+Click the 05C button for the relevant eye. The default projection centre is:
 
 ```text
 Center between eyes
@@ -902,7 +902,7 @@ Choose:
 - target anatomical eye
 - mirror plane
 
-The current default mirror plane is:
+The default mirror plane is:
 
 ```text
 YZ plane
@@ -915,7 +915,7 @@ eye1/
 eye2/
 ```
 
-It no longer creates separate `eye2_mirrored_from_eye1_*` folders. If you mirror again, the target eye's 04/05A/05B/05C outputs and old target QC plots are overwritten.
+Mirroring writes directly into the target eye folder. Re-running mirroring overwrites existing target-eye 04/05A/05B/05C outputs and corresponding QC plots.
 
 Mirroring includes the available outputs from checked facet positions through corneal projections:
 
@@ -928,11 +928,7 @@ Mirroring includes the available outputs from checked facet positions through co
 
 Optical values and corneal projections are mirrored from existing outputs; they are not recalculated. Specimen-level head landmarks are not mirrored. They remain the real landmarks of the head.
 
-After mirroring, the Workflow and R Analysis tabs mark mirrored-derived steps with `⇄`. Normal R Analysis plot buttons are available for mirrored target eyes where the corresponding mirrored files exist. Calculation buttons are disabled for mirrored eyes to avoid accidentally replacing mirrored-derived values by recomputed values.
-
-```{r fig-34-mirroring-actual-eye, fig.cap="Mirroring page after creating a mirrored target eye in the actual eye folder.", out.width="66%", fig.align="center", fig.pos="H"}
-knitr::include_graphics("docs/images/mirroring_actual_eye.png")
-```
+After mirroring, Workflow and R Analysis mark mirrored steps with \(\rightleftarrows\). Calculation buttons are disabled for mirrored eyes to prevent mirrored outputs from being replaced by newly calculated values.
 
 ---
 
@@ -999,7 +995,7 @@ projection_sphere_radius_um
 projection_center_mode
 ```
 
-The QC PDF report creates a compact specimen-level document with metadata, summary tables, optic-parameter barplots, and a CP latitude/longitude plot. The current PDF creation does not require `matplotlib`; it uses built-in PDF drawing.
+The QC PDF report creates a compact specimen-level document with metadata, summary tables, optic-parameter barplots, and a corneal projection latitude/longitude plot.
 
 ```{r fig-35-results-export, fig.cap="Results / Export page with readiness, table export, PDF report, ZIP export, and final export folder.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/results_export_page.png")
@@ -1065,7 +1061,7 @@ CV0001_CV3D/
    |--- ...
 ```
 
-Scientific output files are kept in the dataset, eye, or final `06_*_results_export` folders. Task metadata and logs should live in `json/` and `logs/` subfolders.
+Task metadata and logs are stored in `json/` and `logs/` subfolders.
 
 ---
 
@@ -1081,7 +1077,7 @@ Run **ImageJ preprocessing** first and then click **Check ImageJ/source outputs*
 
 ## 3D Viewer shows more than one surface or old surfaces
 
-Close the 3D Viewer window before continuing. The current mesh extraction workflow should close the preview 3D Viewer before opening the final full-resolution 3D Viewer, but manual cleanup may still be needed in some Fiji sessions.
+Close any open 3D Viewer windows before continuing. If old surfaces remain visible, close the 3D Viewer manually and rerun STL extraction.
 
 ## The STL is saved but the app says it is missing
 
@@ -1146,7 +1142,7 @@ Check that upstream outputs exist. In particular:
 05C requires 05B global-coordinate outputs
 ```
 
-If the dataset was opened after moving folders or after a patch, use the current app version. It rebuilds many workflow states from the actual output files on disk.
+If the dataset was moved, reopen it from Project Manager and run the output checks so the workflow state is rebuilt from files on disk.
 
 ## 05B global alignment looks wrong
 
@@ -1160,11 +1156,11 @@ eyeX/05B_CVxxxx_eyeX_global_coordinate_metadata_roi_reference.csv
 
 ## 05C corneal projection looks shifted
 
-Check the 05C parameters used in the task/status JSON and rerun the CP step if needed. The default projection centre is now `Center between eyes`. The projection sphere diameter is entered in centimetres in the dialog and stored internally in micrometres.
+Check the 05C parameters in the task/status JSON and rerun Step 05C if needed. The default projection centre is `Center between eyes`.
 
 ## Mirroring overwrote the target eye
 
-This is expected. Mirroring now writes into the actual target eye folder and overwrites target-eye 04/05A/05B/05C outputs. Use mirroring only when the target eye should be replaced by a mirrored source eye.
+Mirroring writes into the target eye folder and overwrites target-eye 04/05A/05B/05C outputs. Use mirroring only when the target eye should be replaced by a mirrored source eye.
 
 ## Results / Export files are missing
 
@@ -1178,7 +1174,7 @@ Use **Open final export folder** in the Results / Export tab.
 
 ## QC PDF report does not open or is empty
 
-First generate the analysis-ready tables, then generate the QC PDF report. If the source tables contain no valid CPD or latitude/longitude values, the report should still be created, but the CP plot may be empty or labelled as unavailable.
+First generate the analysis-ready tables, then generate the QC PDF report. If the source tables contain no valid CPD or latitude/longitude values, the report can still be generated, but the corneal projection plot may be empty or labelled as unavailable.
 
 ---
 
@@ -1247,4 +1243,4 @@ First generate the analysis-ready tables, then generate the QC PDF report. If th
 
 # End of tutorial
 
-This tutorial describes the current pre-release workflow through analysis-ready export. Later optional biological analyses, such as field-of-view summaries or regional visual specialization, should be treated as downstream analyses rather than core pipeline output.
+This tutorial covers the workflow through analysis-ready export files and report generation. Later optional biological analyses, such as field-of-view summaries or regional visual specialization, are treated as subsequent downstream analyses rather than core pipeline output.

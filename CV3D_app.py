@@ -10,6 +10,7 @@ import sys
 import subprocess
 import zipfile
 import base64
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from PySide6.QtCore import Qt, QUrl
-    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtGui import QDesktopServices, QImage
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -32,14 +33,18 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.77"
+APP_VERSION = "0.1.83"
 
 CHANGELOG = [
+    "0.1.83: Improved Results/Export QC PDF typography, path wrapping, PDF-safe status symbols, rotated table headers, and stricter equal-unit plot panels.",
+    "0.1.82: Polished Results/Export QC PDF text/layout, removed landmark-reference panels, enforced equal-unit coordinate panels, and embeds 05C rgl snapshots.",
     "0.1.77: Set post-global-coordinate rgl camera from explicit screen-axis basis: x diagonal down-right, y diagonal up-right, z upward, with perspective.",
     "0.1.76: Adjusted post-global-coordinate rgl camera to x/y diagonal, z-up perspective view.",
     "0.1.75: Standardized the rgl camera for post-global-coordinate 05B/05C QC views.",
     "0.1.74: Restored eye-wise 05B/05C QC buttons to single-eye plotting; only combined buttons plot both eyes.",
     "0.1.73: Updated the default GitHub repository to Pete-s-Lab/CV3D while keeping the R package namespace CompoundVision3D.",
+    "0.1.81: Fixed Results/Export report path handling so final-export files are not nested twice.",
+    "0.1.80: Results/Export QC PDF now uses cleaner vector-style QC plots, optional fresh 05C rgl snapshots, and combined plus eye-wise sections.",
     "0.1.72: Results/Export now reports the absolute export folder and creates the QC PDF without requiring matplotlib.",
     "0.1.71: Rebuilds workflow/R Analysis states from existing on-disk outputs when loading recovered or stale datasets.",
     "0.1.70: Added registry recovery for moved/relative dataset folders so existing datasets still open after helper-path migration.",
@@ -2053,15 +2058,17 @@ class CV3DMainWindow(QMainWindow):
         options_layout = QVBoxLayout(options_box)
         self.report_include_summary_table = QCheckBox("Include specimen and eye summary tables")
         self.report_include_summary_table.setChecked(True)
-        self.report_include_05b_qc = QCheckBox("Include workflow/QC status summary")
+        self.report_include_05b_qc = QCheckBox("Include 05B global-coordinate QC plots (combined and eye-wise)")
         self.report_include_05b_qc.setChecked(True)
-        self.report_include_cp_plots = QCheckBox("Include corneal-projection latitude/longitude CPD plot")
+        self.report_include_cp_plots = QCheckBox("Include 05C corneal-projection QC plots (combined and eye-wise)")
         self.report_include_cp_plots.setChecked(True)
-        self.report_include_optic_barplots = QCheckBox("Include optic-parameter summary barplots")
+        self.report_include_optic_barplots = QCheckBox("Include 05A optic-parameter summaries and distributions")
         self.report_include_optic_barplots.setChecked(True)
-        self.report_include_downstream_examples = QCheckBox("Include example downstream visual-field plots")
-        self.report_include_downstream_examples.setChecked(False)
-        for cb in [self.report_include_summary_table, self.report_include_05b_qc, self.report_include_cp_plots, self.report_include_optic_barplots, self.report_include_downstream_examples]:
+        self.report_include_downstream_examples = QCheckBox("Include additional latitude/longitude maps for optic parameters")
+        self.report_include_downstream_examples.setChecked(True)
+        self.report_create_fresh_rgl_snapshots = QCheckBox("Regenerate 05C rgl snapshot PNGs for the report")
+        self.report_create_fresh_rgl_snapshots.setChecked(True)
+        for cb in [self.report_include_summary_table, self.report_include_05b_qc, self.report_include_cp_plots, self.report_include_optic_barplots, self.report_include_downstream_examples, self.report_create_fresh_rgl_snapshots]:
             options_layout.addWidget(cb)
         layout.addWidget(options_box)
 
@@ -8929,29 +8936,138 @@ class CV3DMainWindow(QMainWindow):
         self.refresh_all()
         QMessageBox.information(self, "Analysis-ready export complete", f"Created {len(result['created_files'])} export files.\n\nFacet rows: {len(result['facet_rows'])}")
 
+    def create_report_05c_rgl_snapshots(self, export_folder: Path) -> List[str]:
+        messages: List[str] = []
+        if not self.config or not self.analysis_folder:
+            return messages
+        rscript = configured_file_path(self.settings.get("rscript_executable", ""))
+        runner = self.resolve_r_analysis_runner("r_step05c_qc_plot_script_path")
+        if rscript is None or runner is None:
+            messages.append("Fresh 05C rgl snapshots skipped because Rscript or the 05C QC runner is not configured.")
+            return messages
+        if not self.ensure_r_package_installed():
+            messages.append("Fresh 05C rgl snapshots skipped because the CompoundVision3D R package is unavailable.")
+            return messages
+
+        cv_id = self.config["dataset_identity"]["cv_id"]
+        scopes = []
+        active = [e for e in self.active_export_eyes() if self.config.get("eyes", {}).get(e, {}).get("present", False)]
+        if len(active) > 1:
+            scopes.append("both_eyes")
+        scopes.extend(active)
+
+        for scope in scopes:
+            if scope == "both_eyes":
+                eyes_to_plot = []
+                for candidate in active:
+                    files = self.config["eyes"].get(candidate, {}).get("files", {})
+                    global_rel = files.get("global_coordinates_file")
+                    projection_rel = files.get("corneal_projections_file")
+                    if not global_rel or not projection_rel:
+                        continue
+                    global_path = self.analysis_folder / str(global_rel)
+                    projection_path = self.analysis_folder / str(projection_rel)
+                    if global_path.exists() and projection_path.exists():
+                        eyes_to_plot.append({
+                            "eye": candidate,
+                            "input_global_coordinates": str(global_rel),
+                            "input_global_coordinates_abs": str(global_path),
+                            "input_corneal_projections": str(projection_rel),
+                            "input_corneal_projections_abs": str(projection_path),
+                        })
+                if not eyes_to_plot:
+                    continue
+            else:
+                files = self.config["eyes"].get(scope, {}).get("files", {})
+                global_rel = files.get("global_coordinates_file")
+                projection_rel = files.get("corneal_projections_file")
+                if not global_rel or not projection_rel:
+                    continue
+                global_path = self.analysis_folder / str(global_rel)
+                projection_path = self.analysis_folder / str(projection_rel)
+                if not (global_path.exists() and projection_path.exists()):
+                    continue
+                eyes_to_plot = [{
+                    "eye": scope,
+                    "input_global_coordinates": str(global_rel),
+                    "input_global_coordinates_abs": str(global_path),
+                    "input_corneal_projections": str(projection_rel),
+                    "input_corneal_projections_abs": str(projection_path),
+                }]
+
+            task_prefix = "06RGL"
+            output_pngs = {axis: str(export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_{axis}.png") for axis in ["front", "back", "left", "right", "top", "bottom"]}
+            output_pngs["latlon"] = str(export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_latlon.png")
+            output_pngs["rgl_3d"] = str(export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_3d_qc.png")
+            task_rel = eye_json_rel_path(active[0] if active else "eye1", f"{task_prefix}_{cv_id}_{scope}_R_task.json")
+            status_rel = eye_json_rel_path(active[0] if active else "eye1", f"{task_prefix}_{cv_id}_{scope}_R_status.json")
+            stdout_rel = eye_log_rel_path(active[0] if active else "eye1", f"{task_prefix}_{cv_id}_{scope}_R_stdout.log")
+            stderr_rel = eye_log_rel_path(active[0] if active else "eye1", f"{task_prefix}_{cv_id}_{scope}_R_stderr.log")
+            task = {
+                "task_type": "05C_qc_plot",
+                "task_prefix": task_prefix,
+                "plot_kind": "corneal_projection_qc",
+                "cv_id": cv_id,
+                "eye": scope,
+                "analysis_folder": str(self.analysis_folder),
+                "input_eyes": eyes_to_plot,
+                "output_plot_pngs_abs": output_pngs,
+                "output_plot_png_abs": output_pngs["rgl_3d"],
+                "output_plot_png": str(Path(output_pngs["rgl_3d"]).name),
+                "open_rgl_window": False,
+                "make_rgl_snapshot": True,
+                "status_file": status_rel,
+                "status_file_abs": str(self.analysis_folder / status_rel),
+                "stdout_file": stdout_rel,
+                "stdout_file_abs": str(self.analysis_folder / stdout_rel),
+                "stderr_file": stderr_rel,
+                "stderr_file_abs": str(self.analysis_folder / stderr_rel),
+                "notes": "Created by CV3D Results/Export for fresh 05C QC rgl snapshots.",
+            }
+            task_path = self.analysis_folder / task_rel
+            write_json(task_path, task)
+            (self.analysis_folder / stdout_rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.analysis_folder / stderr_rel).parent.mkdir(parents=True, exist_ok=True)
+            cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
+            try:
+                with (self.analysis_folder / stdout_rel).open("w", encoding="utf-8", errors="replace") as out, (self.analysis_folder / stderr_rel).open("w", encoding="utf-8", errors="replace") as err:
+                    result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                if result.returncode == 0 and Path(output_pngs["rgl_3d"]).exists():
+                    messages.append(f"Fresh 05C rgl snapshot created for {scope}: {Path(output_pngs['rgl_3d']).name}")
+                else:
+                    messages.append(f"Fresh 05C rgl snapshot failed for {scope}. See {stderr_rel}.")
+            except Exception as e:
+                messages.append(f"Fresh 05C rgl snapshot failed for {scope}: {e}")
+        return messages
+
     def generate_qc_pdf_report(self) -> None:
         if not self.config or not self.analysis_folder:
             return
-        result = self.write_export_tables()
-        facet_rows = result["facet_rows"]
-        summary_rows = result["summary_rows"]
-        if not facet_rows:
-            QMessageBox.warning(self, "No export rows", "No facet-level rows are available for the QC report.")
-            return
         self.ensure_report_outputs_config()
+        self.write_export_tables()
         out = self.config["report_outputs"]
         cv_id = self.config["dataset_identity"]["cv_id"]
+        export_folder = self.analysis_folder / out["export_folder"]["folder"]
+        export_folder.mkdir(parents=True, exist_ok=True)
         pdf_path = self.analysis_folder / out["qc_pdf_report"]["file"]
         html_path = self.analysis_folder / out["html_report"]["file"]
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         html_path.parent.mkdir(parents=True, exist_ok=True)
 
-        def to_float(row, col):
+        facet_rows = self.collect_analysis_ready_rows()
+        summary_rows = self.build_eye_summary_rows(facet_rows)
+        freshness_messages = []
+        if getattr(self, "report_create_fresh_rgl_snapshots", None) is not None and self.report_create_fresh_rgl_snapshots.isChecked():
+            freshness_messages = self.create_report_05c_rgl_snapshots(export_folder)
+
+        def to_float(row, key):
             try:
-                v = float(row.get(col, ""))
-                return v if v == v else None
+                v = float(row.get(key, ""))
+                if v == v:
+                    return v
             except Exception:
-                return None
+                pass
+            return None
 
         def fmt(value, digits=4):
             if value in (None, ""):
@@ -8964,18 +9080,38 @@ class CV3DMainWindow(QMainWindow):
             except Exception:
                 return str(value)
 
+        def pdf_text(text_value):
+            safe = str(text_value)
+            replacements = {
+                "✓": "OK", "✔": "OK", "✗": "not OK", "×": "x",
+                "⇄": "derived", "→": "->", "←": "<-", "–": "-", "—": "-",
+                "µ": "u", "μ": "u", "°": " deg", "≤": "<=", "≥": ">=",
+                "“": '"', "”": '"', "‘": "'", "’": "'",
+            }
+            for a, b in replacements.items():
+                safe = safe.replace(a, b)
+            # Built-in PDF Helvetica is Latin-1 here; drop unsupported glyphs before encoding.
+            return "".join(ch if ord(ch) < 256 else "" for ch in safe)
+
         def pdf_escape(text_value):
-            return str(text_value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            safe = pdf_text(text_value)
+            return safe.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
         def text_cmd(x, y, text_value, size=10, font="F1"):
             return f"BT /{font} {size} Tf {x:.2f} {y:.2f} Td ({pdf_escape(text_value)}) Tj ET"
+
+        def text_rotated_cmd(x, y, text_value, angle_deg=22.5, size=7, font="F2"):
+            import math
+            a = math.radians(angle_deg)
+            c = math.cos(a)
+            s = math.sin(a)
+            return f"BT /{font} {size} Tf {c:.5f} {s:.5f} {-s:.5f} {c:.5f} {x:.2f} {y:.2f} Tm ({pdf_escape(text_value)}) Tj ET"
 
         def line_cmd(x1, y1, x2, y2):
             return f"{x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S"
 
         def rect_cmd(x, y, w, h, fill=False):
-            op = "f" if fill else "S"
-            return f"{x:.2f} {y:.2f} {w:.2f} {h:.2f} re {op}"
+            return f"{x:.2f} {y:.2f} {w:.2f} {h:.2f} re {'f' if fill else 'S'}"
 
         def circle_cmd(x, y, r, fill=True):
             k = 0.55228475 * r
@@ -8988,42 +9124,116 @@ class CV3DMainWindow(QMainWindow):
                 f"{x + k:.2f} {y - r:.2f} {x + r:.2f} {y - k:.2f} {x + r:.2f} {y:.2f} c {op}"
             )
 
-        def new_page(title=None):
+        def tri_cmd(x, y, r, fill=True):
+            pts = [(x, y + r), (x - 0.866*r, y - 0.5*r), (x + 0.866*r, y - 0.5*r)]
+            op = 'f' if fill else 'S'
+            return f"{pts[0][0]:.2f} {pts[0][1]:.2f} m {pts[1][0]:.2f} {pts[1][1]:.2f} l {pts[2][0]:.2f} {pts[2][1]:.2f} l h {op}"
+
+        def rgb_for_value(v, vmin, vmax):
+            anchors = [
+                (68/255.0, 1/255.0, 84/255.0),
+                (59/255.0, 82/255.0, 139/255.0),
+                (33/255.0, 145/255.0, 140/255.0),
+                (94/255.0, 201/255.0, 98/255.0),
+                (253/255.0, 231/255.0, 37/255.0),
+            ]
+            if v is None:
+                return (0.45, 0.45, 0.45)
+            if vmax <= vmin:
+                t = 0.5
+            else:
+                t = max(0.0, min(1.0, (v - vmin) / (vmax - vmin)))
+            pos = t * (len(anchors) - 1)
+            i = int(pos)
+            if i >= len(anchors) - 1:
+                return anchors[-1]
+            frac = pos - i
+            a = anchors[i]
+            b = anchors[i+1]
+            return tuple(a[j] * (1-frac) + b[j] * frac for j in range(3))
+
+        def shape_for_eye(eye):
+            return 'triangle' if str(eye) == 'eye2' else 'circle'
+
+        def draw_marker(cmds, x, y, size, shape, rgb):
+            cmds.append(f"{rgb[0]:.3f} {rgb[1]:.3f} {rgb[2]:.3f} rg")
+            if shape == 'triangle':
+                cmds.append(tri_cmd(x, y, size, True))
+            else:
+                cmds.append(circle_cmd(x, y, size, True))
+            cmds.append("0 0 0 rg")
+
+        def new_page(title=None, subtitle=None):
             cmds = ["0 0 0 RG", "0 0 0 rg", "1 w"]
             if title:
-                cmds.append(text_cmd(45, 800, title, 16, "F2"))
-                cmds.append(line_cmd(45, 790, 550, 790))
+                cmds.append(text_cmd(42, 805, title, 16, "F2"))
+                if subtitle:
+                    cmds.append(text_cmd(42, 789, subtitle, 9, "F1"))
+                    cmds.append(line_cmd(42, 782, 553, 782))
+                else:
+                    cmds.append(line_cmd(42, 790, 553, 790))
             return cmds
 
-        def write_lines(cmds, lines, x=45, y=760, size=10, leading=15, max_lines=45):
+        def wrap_pdf_line(line, max_chars=98):
+            line = pdf_text(line)
+            if len(line) <= max_chars:
+                return [line]
+            out = []
+            rest = line
+            while len(rest) > max_chars:
+                cut = max(rest.rfind("/", 0, max_chars), rest.rfind("\\", 0, max_chars), rest.rfind(" ", 0, max_chars))
+                if cut < max_chars * 0.45:
+                    cut = max_chars
+                out.append(rest[:cut].rstrip())
+                rest = rest[cut:].lstrip(" /\\")
+                if out and ("Final export folder:" in out[-1] or "folder:" in out[-1].lower()):
+                    max_chars = 92
+            if rest:
+                out.append(rest)
+            return out
+
+        def write_lines(cmds, lines, x=45, y=760, size=10, leading=15, max_lines=42, max_chars=98):
             yy = y
-            for line in lines[:max_lines]:
-                cmds.append(text_cmd(x, yy, line, size))
-                yy -= leading
+            written = 0
+            for line in lines:
+                for part in wrap_pdf_line(line, max_chars=max_chars):
+                    if written >= max_lines:
+                        return yy
+                    cmds.append(text_cmd(x, yy, part, size))
+                    yy -= leading
+                    written += 1
             return yy
 
-        def table_page(title, rows, cols, max_rows=28):
+        def table_page(title, rows, cols, widths=None, max_rows=28):
             cmds = new_page(title)
-            x0, y0 = 45, 760
+            x0, y0 = 42, 748
             row_h = 18
-            col_w = 505 / max(1, len(cols))
-            cmds.append("0.92 0.92 0.92 rg")
-            cmds.append(rect_cmd(x0, y0 - row_h + 4, 505, row_h, fill=True))
+            header_h = 58
+            if widths is None:
+                widths = [511 / max(1, len(cols))] * len(cols)
+            total_w = sum(widths)
+            cmds.append("0.93 0.93 0.93 rg")
+            cmds.append(rect_cmd(x0, y0 - header_h + 6, total_w, header_h, fill=True))
             cmds.append("0 0 0 rg")
+            x = x0
             for i, col in enumerate(cols):
-                cmds.append(text_cmd(x0 + i * col_w + 2, y0 - 8, col, 7, "F2"))
-            y = y0 - row_h
+                # Rotate long column names to avoid overlap in narrow PDF tables.
+                cmds.append(text_rotated_cmd(x + 5, y0 - header_h + 12, col, angle_deg=22.5, size=6.5, font="F2"))
+                x += widths[i]
+            y = y0 - header_h - 4
             for r in rows[:max_rows]:
+                x = x0
                 for i, col in enumerate(cols):
                     val = r.get(col, "")
-                    if col not in {"eye_scope", "eye", "mirrored_from_eye", "mirror_plane"}:
+                    if col not in {"eye_scope", "eye", "mirrored_from_eye", "mirror_plane", "created_by", "file", "description"}:
                         val = fmt(val, 4)
-                    txt = str(val)
-                    if len(txt) > 14:
-                        txt = txt[:13] + "..."
-                    cmds.append(text_cmd(x0 + i * col_w + 2, y - 8, txt, 7))
-                cmds.append("0.85 0.85 0.85 RG")
-                cmds.append(line_cmd(x0, y - row_h + 4, x0 + 505, y - row_h + 4))
+                    txt = pdf_text(val)
+                    if len(txt) > max(10, int(widths[i] / 5)):
+                        txt = txt[:max(7, int(widths[i]/5)-3)] + "..."
+                    cmds.append(text_cmd(x + 2, y - 8, txt, 7))
+                    x += widths[i]
+                cmds.append("0.86 0.86 0.86 RG")
+                cmds.append(line_cmd(x0, y - row_h + 4, x0 + total_w, y - row_h + 4))
                 cmds.append("0 0 0 RG")
                 y -= row_h
                 if y < 55:
@@ -9032,22 +9242,212 @@ class CV3DMainWindow(QMainWindow):
                 cmds.append(text_cmd(x0, 38, f"Table truncated in PDF; full table is exported as CSV. Rows shown: {max_rows} of {len(rows)}", 8))
             return cmds
 
-        def barplot_page():
-            cmds = new_page("Optic-parameter summary barplots")
-            eye_rows = [r for r in summary_rows if r.get("eye_scope") in EYES]
-            metrics = [
-                ("n_facets", "Facet count"),
-                ("mean_facet_size_um", "Mean facet size (um)"),
-                ("mean_interfacet_angle_deg", "Mean interfacet angle (deg)"),
-                ("mean_CPD", "Mean CPD"),
-                ("mean_sensitivity", "Mean sensitivity"),
-            ]
-            labels = [r.get("eye_scope", "") for r in eye_rows]
-            left = 75
-            plot_w = 430
-            top = 735
-            plot_h = 105
-            gap = 35
+        def plot_bounds(xvals, yvals, pad=0.08, force_equal=False):
+            if not xvals or not yvals:
+                return (0, 1, 0, 1)
+            xmin, xmax = min(xvals), max(xvals)
+            ymin, ymax = min(yvals), max(yvals)
+            xr = xmax - xmin
+            yr = ymax - ymin
+            if xr <= 0: xr = 1.0
+            if yr <= 0: yr = 1.0
+            if force_equal:
+                rr = max(xr, yr)
+                cx = (xmin + xmax) / 2.0
+                cy = (ymin + ymax) / 2.0
+                xmin, xmax = cx - rr / 2.0, cx + rr / 2.0
+                ymin, ymax = cy - rr / 2.0, cy + rr / 2.0
+                xr = yr = rr
+            return (xmin - xr*pad, xmax + xr*pad, ymin - yr*pad, ymax + yr*pad)
+
+        def fit_equal_units_area(x0, y0, w, h, xbounds, ybounds):
+            xr = max(abs(xbounds[1] - xbounds[0]), 1e-9)
+            yr = max(abs(ybounds[1] - ybounds[0]), 1e-9)
+            desired = xr / yr
+            available = w / h
+            if available > desired:
+                ww = h * desired
+                return (x0 + (w - ww) / 2.0, y0, ww, h)
+            hh = w / desired
+            return (x0, y0 + (h - hh) / 2.0, w, hh)
+
+        def square_plot_area(x0, y0, w, h):
+            s = min(w, h)
+            return (x0 + (w - s) / 2.0, y0 + (h - s) / 2.0, s, s)
+
+        def latlon_plot_area(x0, y0, w, h):
+            # Longitude range is twice the latitude range, so equal degree units need a 2:1 panel.
+            desired = 2.0
+            available = w / h
+            if available > desired:
+                ww = h * desired
+                return (x0 + (w - ww) / 2.0, y0, ww, h)
+            hh = w / desired
+            return (x0, y0 + (h - hh) / 2.0, w, hh)
+
+        def draw_axes_frame(cmds, x0, y0, w, h, xlabel='', ylabel='', xticks=None, yticks=None, xbounds=None, ybounds=None, grid=True):
+            cmds.append("0 0 0 RG")
+            cmds.append(rect_cmd(x0, y0, w, h, fill=False))
+            if xticks is None and xbounds is not None:
+                xticks = [xbounds[0] + i*(xbounds[1]-xbounds[0])/4 for i in range(5)]
+            if yticks is None and ybounds is not None:
+                yticks = [ybounds[0] + i*(ybounds[1]-ybounds[0])/4 for i in range(5)]
+            if grid and xbounds is not None:
+                for v in xticks[1:-1]:
+                    xx = x0 + (v - xbounds[0]) / (xbounds[1] - xbounds[0]) * w
+                    cmds.append("0.88 0.88 0.88 RG")
+                    cmds.append(line_cmd(xx, y0, xx, y0 + h))
+                for v in yticks[1:-1]:
+                    yy = y0 + (v - ybounds[0]) / (ybounds[1] - ybounds[0]) * h
+                    cmds.append("0.88 0.88 0.88 RG")
+                    cmds.append(line_cmd(x0, yy, x0 + w, yy))
+                cmds.append("0 0 0 RG")
+            if xbounds is not None:
+                for v in xticks:
+                    xx = x0 + (v - xbounds[0]) / (xbounds[1] - xbounds[0]) * w
+                    cmds.append(text_cmd(xx - 10, y0 - 12, fmt(v, 3), 7))
+            if ybounds is not None:
+                for v in yticks:
+                    yy = y0 + (v - ybounds[0]) / (ybounds[1] - ybounds[0]) * h
+                    cmds.append(text_cmd(x0 - 28, yy - 3, fmt(v, 3), 7))
+            if xlabel:
+                cmds.append(text_cmd(x0 + w/2 - max(20, len(xlabel)*1.8), y0 - 26, xlabel, 8))
+            if ylabel:
+                cmds.append(text_cmd(x0 - 34, y0 + h/2, ylabel, 8))
+
+        def draw_colorbar(cmds, x, y, h, vmin, vmax, label):
+            steps = 40
+            for i in range(steps):
+                rgb = rgb_for_value(vmin + (i / max(1, steps-1))*(vmax-vmin), vmin, vmax)
+                cmds.append(f"{rgb[0]:.3f} {rgb[1]:.3f} {rgb[2]:.3f} rg")
+                cmds.append(rect_cmd(x, y + i*(h/steps), 10, h/steps + 0.3, fill=True))
+            cmds.append("0 0 0 rg")
+            cmds.append(rect_cmd(x, y, 10, h, fill=False))
+            cmds.append(text_cmd(x + 14, y + h - 2, fmt(vmax, 4), 7))
+            cmds.append(text_cmd(x + 14, y - 2, fmt(vmin, 4), 7))
+            cmds.append(text_cmd(x - 2, y + h + 10, label, 8))
+
+        def choose_projection_cols(rows, suffix):
+            candidates = {
+                'xy': [f'x{suffix}', f'y{suffix}'],
+                'xz': [f'x{suffix}', f'z{suffix}'],
+                'yz': [f'y{suffix}', f'z{suffix}'],
+            }
+            best = ['x'+suffix, 'y'+suffix]
+            best_score = -1.0
+            for cols in candidates.values():
+                vals1, vals2 = [], []
+                for row in rows:
+                    v1 = to_float(row, cols[0])
+                    v2 = to_float(row, cols[1])
+                    if v1 is not None and v2 is not None:
+                        vals1.append(v1); vals2.append(v2)
+                if len(vals1) < 2:
+                    continue
+                score = (max(vals1)-min(vals1)) * (max(vals2)-min(vals2))
+                if score > best_score:
+                    best_score = score
+                    best = cols
+            return best
+
+        def load_05b_rows(scope):
+            rows = []
+            eyes = self.active_export_eyes() if scope == 'both_eyes' else [scope]
+            for eye in eyes:
+                files = self.config.get('eyes', {}).get(eye, {}).get('files', {})
+                rel = files.get('global_aligned_pointcloud_file')
+                if not rel:
+                    continue
+                for row in self.read_csv_rows_rel(rel):
+                    rr = dict(row)
+                    rr['source_eye'] = eye
+                    rows.append(rr)
+            return rows
+
+        def draw_pointcloud_panel(cmds, panel_title, rows, coord_suffix, x0, y0, w, h):
+            if not rows:
+                cmds.append(text_cmd(x0, y0 + h/2, f"{panel_title}: no data", 10))
+                return
+            facets, landmarks = [], []
+            for row in rows:
+                pt = str(row.get('point_type', row.get('type', 'facet'))).strip().lower()
+                if pt in ['lm', 'landmark', 'head_landmark']:
+                    landmarks.append(row)
+                else:
+                    facets.append(row)
+            proj_cols = choose_projection_cols(rows, coord_suffix)
+            xkey, ykey = proj_cols
+            xs, ys, vals, facet_pts, landmark_pts = [], [], [], [], []
+            for row in facets:
+                xv = to_float(row, xkey); yv = to_float(row, ykey)
+                if xv is None or yv is None:
+                    continue
+                sv = to_float(row, 'size')
+                facet_pts.append((xv, yv, sv, row.get('source_eye', 'eye1')))
+                xs.append(xv); ys.append(yv)
+                if sv is not None: vals.append(sv)
+            for row in landmarks:
+                xv = to_float(row, xkey); yv = to_float(row, ykey)
+                if xv is None or yv is None:
+                    continue
+                landmark_pts.append((xv, yv, str(row.get('landmark', row.get('point_id', 'LM')))))
+                xs.append(xv); ys.append(yv)
+            if not xs or not ys:
+                cmds.append(text_cmd(x0, y0 + h/2, f"{panel_title}: no finite coordinates", 10))
+                return
+            xmin, xmax, ymin, ymax = plot_bounds(xs, ys, force_equal=True)
+            px0, py0, pw, ph = fit_equal_units_area(x0, y0, w, h, (xmin, xmax), (ymin, ymax))
+            draw_axes_frame(cmds, px0, py0, pw, ph, xlabel=xkey, ylabel=ykey, xbounds=(xmin, xmax), ybounds=(ymin, ymax), grid=True)
+            cmds.append(text_cmd(x0, y0 + h + 10, panel_title, 10, 'F2'))
+            vmin, vmax = (min(vals), max(vals)) if vals else (0.0, 1.0)
+            if vmax <= vmin: vmax = vmin + 1.0
+            for xv, yv, sv, eye in facet_pts:
+                px = px0 + (xv - xmin) / (xmax - xmin) * pw
+                py = py0 + (yv - ymin) / (ymax - ymin) * ph
+                draw_marker(cmds, px, py, 1.6 if shape_for_eye(eye) == 'triangle' else 1.35, shape_for_eye(eye), rgb_for_value(sv, vmin, vmax))
+            cmds.append("0 0 1 rg")
+            for xv, yv, lab in landmark_pts:
+                px = px0 + (xv - xmin) / (xmax - xmin) * pw
+                py = py0 + (yv - ymin) / (ymax - ymin) * ph
+                cmds.append(circle_cmd(px, py, 2.2, True))
+                cmds.append(text_cmd(px + 3, py + 2, lab, 7))
+            cmds.append("0 0 0 rg")
+            draw_colorbar(cmds, x0 + w + 8, y0 + 20, h - 40, vmin, vmax, 'Facet size')
+
+        def draw_hist_panel(cmds, rows1, rows2, key, title, x0, y0, w, h):
+            vals1 = [to_float(r, key) for r in rows1]; vals1 = [v for v in vals1 if v is not None]
+            vals2 = [to_float(r, key) for r in rows2]; vals2 = [v for v in vals2 if v is not None]
+            vals = vals1 + vals2
+            if not vals:
+                cmds.append(text_cmd(x0, y0 + h/2, f"{title}: no data", 9))
+                return
+            vmin, vmax = min(vals), max(vals)
+            if vmax <= vmin: vmax = vmin + 1.0
+            bins = 20
+            step = (vmax - vmin) / bins
+            c1 = [0]*bins; c2 = [0]*bins
+            for v in vals1:
+                c1[min(bins-1, max(0, int((v - vmin) / step)))] += 1
+            for v in vals2:
+                c2[min(bins-1, max(0, int((v - vmin) / step)))] += 1
+            ymax = max(max(c1 or [1]), max(c2 or [1]))
+            draw_axes_frame(cmds, x0, y0, w, h, xlabel=key, ylabel='count', xbounds=(vmin, vmax), ybounds=(0, ymax), grid=True)
+            cmds.append(text_cmd(x0, y0 + h + 10, title, 9, 'F2'))
+            bw = w / bins
+            for i in range(bins):
+                x = x0 + i*bw
+                h1 = (c1[i]/ymax) * (h - 2) if ymax > 0 else 0
+                h2 = (c2[i]/ymax) * (h - 2) if ymax > 0 else 0
+                cmds.append('0.55 0.55 0.55 rg'); cmds.append(rect_cmd(x + 0.5, y0, bw*0.45, h1, fill=True))
+                cmds.append('0.78 0.78 0.78 rg'); cmds.append(rect_cmd(x + bw*0.5, y0, bw*0.45, h2, fill=True))
+            cmds.append('0 0 0 rg')
+
+        def optic_barplots_page():
+            cmds = new_page('05A optic-parameter summaries', 'Eye-wise means and counts from analysis-ready export tables')
+            eye_rows = [r for r in summary_rows if r.get('eye_scope') in EYES]
+            metrics = [('n_facets', 'Facet count'), ('mean_facet_size_um', 'Mean facet size (um)'), ('mean_interfacet_angle_deg', 'Mean interfacet angle (deg)'), ('mean_CPD', 'Mean CPD'), ('mean_sensitivity', 'Mean sensitivity')]
+            left, plot_w, top, plot_h, gap = 68, 420, 735, 86, 22
+            labels = [r.get('eye_scope', '') for r in eye_rows]
             for mi, (col, label) in enumerate(metrics):
                 y_base = top - mi * (plot_h + gap) - plot_h
                 vals = []
@@ -9055,78 +9455,183 @@ class CV3DMainWindow(QMainWindow):
                     v = to_float(r, col)
                     vals.append(0 if v is None else v)
                 max_v = max(vals) if vals else 1
-                if max_v <= 0:
-                    max_v = 1
-                cmds.append(text_cmd(left, y_base + plot_h + 10, label, 10, "F2"))
-                cmds.append("0 0 0 RG")
-                cmds.append(line_cmd(left, y_base, left + plot_w, y_base))
-                cmds.append(line_cmd(left, y_base, left, y_base + plot_h))
+                if max_v <= 0: max_v = 1
+                cmds.append(text_cmd(left, y_base + plot_h + 8, label, 10, 'F2'))
+                draw_axes_frame(cmds, left, y_base, plot_w, plot_h, xlabel='', ylabel='', xbounds=(0, max(1, len(vals))), ybounds=(0, max_v), grid=True)
                 n = max(1, len(vals))
-                bar_w = min(70, plot_w / (n * 2))
+                band = plot_w / n
                 for i, v in enumerate(vals):
-                    x = left + 35 + i * (plot_w / max(1, n))
-                    h = (v / max_v) * (plot_h - 18)
-                    if i % 2 == 0:
-                        cmds.append("0.35 0.35 0.35 rg")
-                    else:
-                        cmds.append("0.60 0.60 0.60 rg")
-                    cmds.append(rect_cmd(x, y_base, bar_w, h, fill=True))
-                    cmds.append("0 0 0 rg")
-                    if i < len(labels):
-                        cmds.append(text_cmd(x, y_base - 12, labels[i], 7))
-                    cmds.append(text_cmd(x, y_base + h + 4, fmt(v, 3), 7))
+                    x = left + i*band + band*0.22
+                    bar_w = band*0.48
+                    hh = (v/max_v) * (plot_h - 8)
+                    rgb = (0.35,0.35,0.35) if i % 2 == 0 else (0.62,0.62,0.62)
+                    cmds.append(f"{rgb[0]:.3f} {rgb[1]:.3f} {rgb[2]:.3f} rg")
+                    cmds.append(rect_cmd(x, y_base, bar_w, hh, fill=True))
+                    cmds.append('0 0 0 rg')
+                    cmds.append(text_cmd(x, y_base - 12, labels[i] if i < len(labels) else f'e{i+1}', 7))
+                    cmds.append(text_cmd(x, y_base + hh + 3, fmt(v, 4), 7))
             return cmds
 
-        def cpd_scatter_page():
-            cmds = new_page("Corneal projection latitude/longitude coloured by CPD")
-            plot_rows = []
-            for row in facet_rows:
-                lon = to_float(row, "longitude")
-                lat = to_float(row, "latitude")
-                cpd = to_float(row, "CPD")
-                if lon is not None and lat is not None:
-                    plot_rows.append((lon, lat, cpd, row.get("eye", "")))
-            left, bottom, width, height = 70, 100, 450, 620
-            cmds.append(line_cmd(left, bottom, left + width, bottom))
-            cmds.append(line_cmd(left, bottom, left, bottom + height))
-            cmds.append(text_cmd(left + width / 2 - 45, bottom - 28, "longitude (deg)", 9))
-            cmds.append(text_cmd(20, bottom + height / 2, "latitude (deg)", 9))
-            for lon_tick in [-180, -90, 0, 90, 180]:
-                x = left + (lon_tick + 180) / 360 * width
-                cmds.append("0.85 0.85 0.85 RG")
-                cmds.append(line_cmd(x, bottom, x, bottom + height))
-                cmds.append("0 0 0 RG")
-                cmds.append(text_cmd(x - 10, bottom - 14, str(lon_tick), 7))
-            for lat_tick in [-90, -45, 0, 45, 90]:
-                y = bottom + (lat_tick + 90) / 180 * height
-                cmds.append("0.85 0.85 0.85 RG")
-                cmds.append(line_cmd(left, y, left + width, y))
-                cmds.append("0 0 0 RG")
-                cmds.append(text_cmd(left - 30, y - 3, str(lat_tick), 7))
-            cpd_vals = [p[2] for p in plot_rows if p[2] is not None]
-            cmin = min(cpd_vals) if cpd_vals else 0
-            cmax = max(cpd_vals) if cpd_vals else 1
-            if cmax == cmin:
-                cmax = cmin + 1
-            max_points = 3500
-            step = max(1, len(plot_rows) // max_points)
-            for lon, lat, cpd, eye in plot_rows[::step]:
-                x = left + (lon + 180) / 360 * width
-                y = bottom + (lat + 90) / 180 * height
-                if cpd is None:
-                    shade = 0.55
-                else:
-                    shade = 0.15 + 0.70 * ((cpd - cmin) / (cmax - cmin))
-                r = 1.6 if eye == "eye2" else 1.2
-                cmds.append(f"{shade:.3f} {shade:.3f} {shade:.3f} rg")
-                cmds.append(circle_cmd(x, y, r, fill=True))
-            cmds.append("0 0 0 rg")
-            if plot_rows:
-                cmds.append(text_cmd(left, 60, f"Points plotted: {len(plot_rows[::step])} of {len(plot_rows)}; greyscale encodes CPD from {fmt(cmin, 3)} to {fmt(cmax, 3)}.", 8))
-            else:
-                cmds.append(text_cmd(left, 400, "No finite latitude/longitude rows available for CPD plotting.", 10))
-            cmds.append(text_cmd(left, 45, "Note: PDF uses built-in drawing only; no matplotlib dependency.", 8))
+        def optic_histograms_page():
+            cmds = new_page('05A optic-parameter distributions', 'Eye1 and eye2 shown as paired histograms')
+            rows1 = [r for r in facet_rows if r.get('eye') == 'eye1']
+            rows2 = [r for r in facet_rows if r.get('eye') == 'eye2']
+            panels = [('facet_size_um', 'Facet size'), ('interfacet_angle_deg', 'Interfacet angle'), ('CPD', 'CPD'), ('sensitivity', 'Sensitivity')]
+            positions = [(50, 450), (315, 450), (50, 150), (315, 150)]
+            for (key, title), (x, y) in zip(panels, positions):
+                draw_hist_panel(cmds, rows1, rows2, key, title, x, y, 220, 180)
+            cmds.append('0.55 0.55 0.55 rg'); cmds.append(rect_cmd(50, 110, 10, 10, fill=True)); cmds.append('0 0 0 rg'); cmds.append(text_cmd(65, 110, 'eye1', 8))
+            cmds.append('0.78 0.78 0.78 rg'); cmds.append(rect_cmd(105, 110, 10, 10, fill=True)); cmds.append('0 0 0 rg'); cmds.append(text_cmd(120, 110, 'eye2', 8))
             return cmds
+
+        def cp_view_points(rows, view_name):
+            view_defs = {
+                'front': ('corn.proj.x', 'corn.proj.z', 'x_global', 'z_global', 1, 1, 'x (um)', 'z (um)'),
+                'back': ('corn.proj.x', 'corn.proj.z', 'x_global', 'z_global', -1, 1, '-x (um)', 'z (um)'),
+                'left': ('corn.proj.y', 'corn.proj.z', 'y_global', 'z_global', 1, 1, 'y (um)', 'z (um)'),
+                'right': ('corn.proj.y', 'corn.proj.z', 'y_global', 'z_global', -1, 1, '-y (um)', 'z (um)'),
+                'top': ('corn.proj.x', 'corn.proj.y', 'x_global', 'y_global', 1, 1, 'x (um)', 'y (um)'),
+                'bottom': ('corn.proj.x', 'corn.proj.y', 'x_global', 'y_global', 1, -1, 'x (um)', '-y (um)'),
+            }
+            pxk, pyk, fxk, fyk, sx, sy, xlab, ylab = view_defs[view_name]
+            pts, xvals, yvals = [], [], []
+            for row in rows:
+                px = to_float(row, pxk); py = to_float(row, pyk); fx = to_float(row, fxk); fy = to_float(row, fyk)
+                if px is not None and py is not None and fx is not None and fy is not None:
+                    item = {'px': px*sx, 'py': py*sy, 'fx': fx*sx, 'fy': fy*sy, 'val': to_float(row, 'CPD'), 'eye': row.get('eye','eye1'), 'size': to_float(row,'facet_size_um')}
+                    pts.append(item)
+                    xvals.extend([item['px'], item['fx']]); yvals.extend([item['py'], item['fy']])
+            return pts, xvals, yvals, xlab, ylab
+
+        def draw_cp_projection_panel(cmds, panel_title, rows, view_name, x0, y0, w, h, color_key='CPD'):
+            pts, xvals, yvals, xlab, ylab = cp_view_points(rows, view_name)
+            if not pts:
+                cmds.append(text_cmd(x0, y0 + h/2, f"{panel_title}: no data", 9))
+                return
+            xmin, xmax, ymin, ymax = plot_bounds(xvals, yvals, force_equal=True)
+            px0, py0, pw, ph = square_plot_area(x0, y0, w, h)
+            draw_axes_frame(cmds, px0, py0, pw, ph, xlabel=xlab, ylabel=ylab, xbounds=(xmin,xmax), ybounds=(ymin,ymax), grid=True)
+            cmds.append(text_cmd(x0, y0 + h + 10, panel_title, 9, 'F2'))
+            vv = [to_float(r, color_key) for r in rows if to_float(r, color_key) is not None]
+            vmin, vmax = (min(vv), max(vv)) if vv else (0.0, 1.0)
+            if vmax <= vmin: vmax = vmin + 1.0
+            for item in pts:
+                fx = px0 + (item['fx'] - xmin) / (xmax - xmin) * pw
+                fy = py0 + (item['fy'] - ymin) / (ymax - ymin) * ph
+                px = px0 + (item['px'] - xmin) / (xmax - xmin) * pw
+                py = py0 + (item['py'] - ymin) / (ymax - ymin) * ph
+                val = item['val'] if color_key == 'CPD' else item.get('size')
+                rgb = rgb_for_value(val, vmin, vmax)
+                draw_marker(cmds, fx, fy, 0.9 if shape_for_eye(item['eye']) == 'triangle' else 0.8, shape_for_eye(item['eye']), rgb)
+                draw_marker(cmds, px, py, 1.4 if shape_for_eye(item['eye']) == 'triangle' else 1.2, shape_for_eye(item['eye']), rgb)
+            draw_colorbar(cmds, x0 + w + 8, y0 + 16, h - 32, vmin, vmax, color_key)
+
+        def draw_latlon_panel(cmds, panel_title, rows, x0, y0, w, h, color_key='CPD'):
+            plot_rows = []
+            for row in rows:
+                lon = to_float(row, 'longitude'); lat = to_float(row, 'latitude')
+                if lon is not None and lat is not None:
+                    plot_rows.append((lon, lat, row))
+            if not plot_rows:
+                cmds.append(text_cmd(x0, y0 + h/2, f"{panel_title}: no data", 9))
+                return
+            xmin, xmax, ymin, ymax = -180, 180, -90, 90
+            px0, py0, pw, ph = latlon_plot_area(x0, y0, w, h)
+            draw_axes_frame(cmds, px0, py0, pw, ph, xlabel='longitude (deg)', ylabel='latitude (deg)', xbounds=(xmin,xmax), ybounds=(ymin,ymax), xticks=[-180,-90,0,90,180], yticks=[-90,-45,0,45,90], grid=True)
+            cmds.append(text_cmd(x0, y0 + h + 10, panel_title, 9, 'F2'))
+            vals = [to_float(r, color_key) for _,_,r in plot_rows if to_float(r, color_key) is not None]
+            vmin, vmax = (min(vals), max(vals)) if vals else (0.0, 1.0)
+            if vmax <= vmin: vmax = vmin + 1.0
+            for lon, lat, row in plot_rows[::max(1, len(plot_rows)//2500)]:
+                px = px0 + (lon - xmin)/(xmax-xmin) * pw
+                py = py0 + (lat - ymin)/(ymax-ymin) * ph
+                val = to_float(row, color_key)
+                draw_marker(cmds, px, py, 1.4 if shape_for_eye(row.get('eye')) == 'triangle' else 1.2, shape_for_eye(row.get('eye')), rgb_for_value(val, vmin, vmax))
+            draw_colorbar(cmds, x0 + w + 8, y0 + 16, h - 32, vmin, vmax, color_key)
+
+        def cp_scope_page(scope_rows, scope_label):
+            cmds = new_page(f'05C corneal-projection QC: {scope_label}', '2D projection panels with equal axis units')
+            draw_latlon_panel(cmds, f'{scope_label}: latitude / longitude coloured by CPD', scope_rows, 42, 470, 250, 150, 'CPD')
+            draw_cp_projection_panel(cmds, f'{scope_label}: front view', scope_rows, 'front', 330, 480, 175, 175, 'CPD')
+            draw_cp_projection_panel(cmds, f'{scope_label}: side view', scope_rows, 'left', 70, 140, 175, 175, 'CPD')
+            draw_cp_projection_panel(cmds, f'{scope_label}: top view', scope_rows, 'top', 330, 140, 175, 175, 'CPD')
+            return cmds
+
+        def latlon_metric_maps_page():
+            cmds = new_page('Additional optic parameter maps', 'Combined eye latitude/longitude maps coloured by analysis-ready metrics')
+            metrics = [('facet_size_um', 'Facet size'), ('interfacet_angle_deg', 'Interfacet angle'), ('CPD', 'CPD'), ('sensitivity', 'Sensitivity')]
+            positions = [(42, 495), (305, 495), (42, 170), (305, 170)]
+            for (key, title), (x, y) in zip(metrics, positions):
+                draw_latlon_panel(cmds, title, facet_rows, x, y, 220, 130, key)
+            return cmds
+
+        def cp_report_pages():
+            pages = []
+            if facet_rows:
+                pages.append(cp_scope_page(facet_rows, 'both eyes'))
+            for eye in self.active_export_eyes():
+                eye_rows = [r for r in facet_rows if r.get('eye') == eye]
+                if eye_rows:
+                    pages.append(cp_scope_page(eye_rows, eye))
+            return pages
+
+        def pointcloud_report_pages():
+            pages = []
+            combined_glb = load_05b_rows('both_eyes')
+            if combined_glb:
+                cmds = new_page('05B coordinate QC: both eyes', 'Global aligned point cloud with equal axis units')
+                draw_pointcloud_panel(cmds, 'Global alignment QC', combined_glb, '_global', 92, 250, 360, 360)
+                pages.append(cmds)
+            eye_cmds = new_page('05B coordinate QC: eye-wise', 'Global aligned point clouds plotted separately')
+            positions = [(70, 420), (335, 420), (70, 110), (335, 110)]
+            labels = [(f'{eye}: global alignment', load_05b_rows(eye), '_global') for eye in self.active_export_eyes()]
+            for (lab, rows, suffix), (x, y) in zip(labels[:4], positions):
+                draw_pointcloud_panel(eye_cmds, lab, rows, suffix, x, y, 200, 230)
+            if labels:
+                pages.append(eye_cmds)
+            return pages
+
+        def image_cmd(path, x, y, w, h):
+            return f"__CV3D_IMAGE__|{str(path).replace('|', '_')}|{x:.2f}|{y:.2f}|{w:.2f}|{h:.2f}"
+
+        def rgl_snapshot_pages():
+            pages = []
+            scopes = []
+            if len(self.active_export_eyes()) > 1:
+                scopes.append('both_eyes')
+            scopes.extend(self.active_export_eyes())
+            existing = []
+            for scope in scopes:
+                p = export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_3d_qc.png"
+                if p.exists():
+                    existing.append((scope, p))
+            if not existing:
+                return pages
+            cmds = new_page('05C rgl snapshots', 'Perspective 3D QC snapshots in the global coordinate system')
+            positions = [(55, 435), (320, 435), (55, 115), (320, 115)]
+            for (scope, p), (x, y) in zip(existing[:4], positions):
+                cmds.append(text_cmd(x, y + 245, scope, 10, 'F2'))
+                cmds.append(image_cmd(p, x, y, 220, 220))
+            pages.append(cmds)
+            return pages
+
+        def qimage_rgb_bytes(path):
+            img = QImage(str(path))
+            if img.isNull():
+                return None
+            img = img.convertToFormat(QImage.Format.Format_RGB888)
+            width = img.width()
+            height = img.height()
+            ptr = img.constBits()
+            try:
+                raw = ptr.tobytes()
+            except AttributeError:
+                raw = bytes(ptr)
+            bpl = img.bytesPerLine()
+            rows = []
+            for yy in range(height):
+                rows.append(raw[yy*bpl:yy*bpl + width*3])
+            return width, height, b''.join(rows)
 
         def build_pdf(path, pages):
             width, height = 595, 842
@@ -9134,89 +9639,126 @@ class CV3DMainWindow(QMainWindow):
             def add_obj(data):
                 objects.append(data)
                 return len(objects)
-            catalog_id = add_obj("<< /Type /Catalog /Pages 2 0 R >>")
-            pages_id = add_obj("")
-            font_id = add_obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-            font_bold_id = add_obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+            catalog_id = add_obj('<< /Type /Catalog /Pages 2 0 R >>')
+            pages_id = add_obj('')
+            font_id = add_obj('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+            font_bold_id = add_obj('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>')
             page_ids = []
-            for cmds in pages:
-                stream = "\n".join(cmds).encode("latin-1", errors="replace")
-                content_id = add_obj(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
-                page_id = add_obj(f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 {font_id} 0 R /F2 {font_bold_id} 0 R >> >> /Contents {content_id} 0 R >>")
+            for cmds_in in pages:
+                image_resources = []
+                content_cmds = []
+                for cmd in cmds_in:
+                    if isinstance(cmd, str) and cmd.startswith('__CV3D_IMAGE__|'):
+                        _, path_s, xs, ys, ws, hs = cmd.split('|', 5)
+                        payload = qimage_rgb_bytes(Path(path_s))
+                        if payload is None:
+                            content_cmds.append(text_cmd(float(xs), float(ys) + float(hs)/2, 'Image unavailable', 10))
+                            continue
+                        iw, ih, rgb = payload
+                        comp = zlib.compress(rgb)
+                        image_id = add_obj(b'<< /Type /XObject /Subtype /Image /Width ' + str(iw).encode('ascii') + b' /Height ' + str(ih).encode('ascii') + b' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length ' + str(len(comp)).encode('ascii') + b' >>\nstream\n' + comp + b'\nendstream')
+                        name = f'Im{len(image_resources)+1}'
+                        image_resources.append((name, image_id))
+                        content_cmds.append(f"q {float(ws):.2f} 0 0 {float(hs):.2f} {float(xs):.2f} {float(ys):.2f} cm /{name} Do Q")
+                    else:
+                        content_cmds.append(cmd)
+                stream = '\n'.join(content_cmds).encode('latin-1', errors='replace')
+                content_id = add_obj(b'<< /Length ' + str(len(stream)).encode('ascii') + b' >>\nstream\n' + stream + b'\nendstream')
+                xobj = ''
+                if image_resources:
+                    xobj = ' /XObject << ' + ' '.join(f'/{name} {objid} 0 R' for name, objid in image_resources) + ' >>'
+                page_id = add_obj(f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 {font_id} 0 R /F2 {font_bold_id} 0 R >>{xobj} >> /Contents {content_id} 0 R >>")
                 page_ids.append(page_id)
             objects[pages_id - 1] = f"<< /Type /Pages /Kids [{' '.join(str(pid) + ' 0 R' for pid in page_ids)}] /Count {len(page_ids)} >>"
-            out_bytes = bytearray(b"%PDF-1.4\n%CompoundVision3D\n")
+            out_bytes = bytearray(b'%PDF-1.4\n%CV3D\n')
             offsets = [0]
             for i, obj in enumerate(objects, start=1):
                 offsets.append(len(out_bytes))
-                out_bytes.extend(f"{i} 0 obj\n".encode("ascii"))
+                out_bytes.extend(f"{i} 0 obj\n".encode('ascii'))
                 if isinstance(obj, bytes):
                     out_bytes.extend(obj)
                 else:
-                    out_bytes.extend(str(obj).encode("latin-1", errors="replace"))
-                out_bytes.extend(b"\nendobj\n")
+                    out_bytes.extend(str(obj).encode('latin-1', errors='replace'))
+                out_bytes.extend(b'\nendobj\n')
             xref_pos = len(out_bytes)
-            out_bytes.extend(f"xref\n0 {len(objects)+1}\n".encode("ascii"))
-            out_bytes.extend(b"0000000000 65535 f \n")
+            out_bytes.extend(f"xref\n0 {len(objects)+1}\n".encode('ascii'))
+            out_bytes.extend(b'0000000000 65535 f \n')
             for off in offsets[1:]:
-                out_bytes.extend(f"{off:010d} 00000 n \n".encode("ascii"))
-            out_bytes.extend(f"trailer\n<< /Size {len(objects)+1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("ascii"))
+                out_bytes.extend(f"{off:010d} 00000 n \n".encode('ascii'))
+            out_bytes.extend(f"trailer\n<< /Size {len(objects)+1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode('ascii'))
             path.write_bytes(bytes(out_bytes))
 
         created_at = now()
         pages = []
-        pages.append(new_page("CompoundVision3D analysis-ready export and QC report"))
-        title_lines = [
-            f"CV ID: {cv_id}",
-            f"Created: {created_at}",
-            f"App version: {APP_VERSION}",
-            f"Export eyes: {', '.join(self.active_export_eyes())}",
-            f"Final export folder: {self.analysis_folder / out['export_folder']['folder']}",
-            "",
-            "This report summarizes method outputs only. It does not infer biological visual-field categories.",
-            "The full analysis-ready data are exported as CSV tables in the same folder.",
+        cover = new_page('CompoundVision3D analysis-ready export and QC report', 'Analysis-ready outputs and QC summary')
+        cover_lines = [
+            f'CV ID: {cv_id}',
+            f'Created: {created_at}',
+            f'App version: {APP_VERSION}',
+            f'Export eyes: {", ".join(self.active_export_eyes())}',
+            f'Final export folder: {out["export_folder"]["folder"]}',
+            f'Absolute path: {export_folder}',
+            '',
+            'This report summarizes method outputs only. It does not infer biological visual-field categories.',
+            'The full analysis-ready data are exported as CSV tables in the same folder.',
         ]
-        write_lines(pages[-1], title_lines, y=760)
+        write_lines(cover, cover_lines, y=758, max_chars=86)
+        pages.append(cover)
 
-        if getattr(self, "report_include_summary_table", None) is None or self.report_include_summary_table.isChecked():
-            table_cols = ["eye_scope", "n_facets", "mean_facet_size_um", "mean_interfacet_angle_deg", "mean_CPD", "mean_sensitivity", "latitude_min", "latitude_max", "longitude_min", "longitude_max"]
-            pages.append(table_page("Specimen and eye summary", summary_rows, table_cols))
+        readiness = new_page('Workflow status and export readiness', 'Current file-based status and Results / Export status')
+        txt = self.export_readiness_text.toPlainText().strip() if getattr(self, 'export_readiness_text', None) is not None else ''
+        write_lines(readiness, txt.splitlines()[:34] if txt else ['No export-readiness text available.'], y=760, leading=14, size=9, max_chars=108)
+        pages.append(readiness)
 
-        if getattr(self, "report_include_optic_barplots", None) is None or self.report_include_optic_barplots.isChecked():
-            pages.append(barplot_page())
+        if getattr(self, 'report_include_summary_table', None) is None or self.report_include_summary_table.isChecked():
+            cols = ['eye_scope', 'n_facets', 'mean_facet_size_um', 'mean_interfacet_angle_deg', 'mean_CPD', 'mean_sensitivity', 'latitude_min', 'latitude_max', 'longitude_min', 'longitude_max']
+            widths = [58, 44, 58, 66, 42, 54, 48, 48, 48, 48]
+            pages.append(table_page('Specimen and eye summary', summary_rows, cols, widths=widths, max_rows=12))
 
-        if getattr(self, "report_include_cp_plots", None) is None or self.report_include_cp_plots.isChecked():
-            pages.append(cpd_scatter_page())
+        if getattr(self, 'report_include_optic_barplots', None) is None or self.report_include_optic_barplots.isChecked():
+            pages.append(optic_barplots_page())
+            pages.append(optic_histograms_page())
+
+        if getattr(self, 'report_include_05b_qc', None) is None or self.report_include_05b_qc.isChecked():
+            pages.extend(pointcloud_report_pages())
+
+        if getattr(self, 'report_include_cp_plots', None) is None or self.report_include_cp_plots.isChecked():
+            pages.extend(cp_report_pages())
+            pages.extend(rgl_snapshot_pages())
+
+        if getattr(self, 'report_include_downstream_examples', None) is not None and self.report_include_downstream_examples.isChecked():
+            pages.append(latlon_metric_maps_page())
 
         build_pdf(pdf_path, pages)
 
+        manifest_rows = self.read_csv_rows_rel(out['export_manifest']['file'])
         html = f"""<!doctype html>
 <html><head><meta charset=\"utf-8\"><title>{cv_id} CV3D analysis-ready export</title></head>
 <body><h1>{cv_id} — CompoundVision3D analysis-ready export</h1>
 <p>Created: {created_at}</p>
 <p>Facet rows: {len(facet_rows)}</p>
 <p>Export eyes: {', '.join(self.active_export_eyes())}</p>
-<p>Final export folder: {self.analysis_folder / out['export_folder']['folder']}</p>
-<p>Core table: {out['analysis_ready_table']['file']}</p>
-<p>QC PDF: {out['qc_pdf_report']['file']}</p>
+<p>Final export folder: {export_folder}</p>
+<p>QC PDF: {pdf_path.name}</p>
+<p>Manifest entries: {len(manifest_rows)}</p>
 </body></html>"""
         write_text(html_path, html)
         timestamp = now()
-        for key in ["qc_pdf_report", "pdf_export", "html_report"]:
+        for key in ['qc_pdf_report', 'pdf_export', 'html_report']:
             if key in out:
-                out[key]["status"] = "complete" if key != "pdf_export" else "exported"
-                out[key]["last_created"] = timestamp
-                out[key]["last_exported"] = timestamp
-        rep = self.status["workflow_steps"].setdefault("06_report_export", {"label": STEP_LABELS["06_report_export"]})
-        rep.setdefault("analysis_ready_export", {"state": "not_created", "symbol": "○", "last_run": None, "needs_rerun": False, "messages": []})
-        rep.setdefault("html_report", {"state": "not_created", "symbol": "○", "last_run": None, "needs_rerun": False, "messages": []})
-        rep.setdefault("pdf_export", {"state": "not_exported", "symbol": "○", "last_exported": None, "outdated_export": False, "messages": []})
-        rep["analysis_ready_export"].update({"state": "complete", "symbol": "✓", "last_run": timestamp, "needs_rerun": False, "messages": [f"Exported {len(facet_rows)} facet rows."]})
-        rep["html_report"].update({"state": "complete", "symbol": "✓", "last_run": timestamp, "needs_rerun": False, "messages": []})
-        rep["pdf_export"].update({"state": "exported", "symbol": "✓", "last_exported": timestamp, "outdated_export": False, "messages": []})
+                out[key]['status'] = 'complete' if key != 'pdf_export' else 'exported'
+                out[key]['last_created'] = timestamp
+                out[key]['last_exported'] = timestamp
+        rep = self.status['workflow_steps'].setdefault('06_report_export', {'label': STEP_LABELS['06_report_export']})
+        rep.setdefault('analysis_ready_export', {'state': 'not_created', 'symbol': '○', 'last_run': None, 'needs_rerun': False, 'messages': []})
+        rep.setdefault('html_report', {'state': 'not_created', 'symbol': '○', 'last_run': None, 'needs_rerun': False, 'messages': []})
+        rep.setdefault('pdf_export', {'state': 'not_exported', 'symbol': '○', 'last_exported': None, 'outdated_export': False, 'messages': []})
+        rep['analysis_ready_export'].update({'state': 'complete', 'symbol': '✓', 'last_run': timestamp, 'needs_rerun': False, 'messages': [f'Exported {len(facet_rows)} facet rows.']})
+        rep['html_report'].update({'state': 'complete', 'symbol': '✓', 'last_run': timestamp, 'needs_rerun': False, 'messages': []})
+        rep['pdf_export'].update({'state': 'exported', 'symbol': '✓', 'last_exported': timestamp, 'outdated_export': False, 'messages': freshness_messages[:]})
         self.save_current_files()
         self.refresh_all()
-        QMessageBox.information(self, "QC PDF report complete", f"Created analysis-ready export and QC PDF report:\n\n{out['qc_pdf_report']['file']}\n\nFolder:\n{self.analysis_folder / out['export_folder']['folder']}")
+        QMessageBox.information(self, 'QC PDF report complete', f'Created analysis-ready export and QC PDF report:\n\n{out["qc_pdf_report"]["file"]}\n\nFolder:\n{export_folder}')
 
     def generate_html_report(self) -> None:
         self.generate_qc_pdf_report()
@@ -9232,10 +9774,11 @@ class CV3DMainWindow(QMainWindow):
         self.write_export_tables()
         zip_name = self.config["report_outputs"]["zip_export"]["file"]
         zip_path = self.analysis_folder / zip_name
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
         include_prefixes = ["06_"]
         include_files = []
         for path in self.analysis_folder.rglob("*"):
-            if not path.is_file() or path.name == zip_name:
+            if not path.is_file() or path.resolve() == zip_path.resolve():
                 continue
             rel = str(path.relative_to(self.analysis_folder))
             if path.name.startswith(tuple(include_prefixes)) or "/05A_" in rel or "/05B_" in rel or "/05C_" in rel or path.name.startswith("00_"):
