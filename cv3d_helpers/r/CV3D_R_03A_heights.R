@@ -6,8 +6,8 @@
 #   Rscript CV3D_R_step03A_local_heights.R <task_json>
 #
 # The task JSON is written by the CV3D Python controller.
-# The CompoundVision3D R package must be installed, normally from:
-#   remotes::install_github("Pete-s-Lab/CompoundVision3D")
+# The CV3D R package must be installed, normally from:
+#   remotes::install_github("Pete-s-Lab/CV3D")
 
 options(warn = 1)
 options(rgl.useNULL = TRUE)
@@ -110,15 +110,15 @@ tryCatch({
     invert <- isTRUE(task$invert_local_heights)
   }
 
-  # Load installed CompoundVision3D package ------------------------------------
-  if (!requireNamespace("CompoundVision3D", quietly = TRUE)) {
+  # Load installed CV3D package ------------------------------------
+  if (!requireNamespace("CV3D", quietly = TRUE)) {
     stop(
-      "The CompoundVision3D R package is not installed. ",
-      "Install it with remotes::install_github('Pete-s-Lab/CompoundVision3D') or use the GUI install button.",
+      "The CV3D R package is not installed. ",
+      "Install it with remotes::install_github('Pete-s-Lab/CV3D') or use the GUI install button.",
       call. = FALSE
     )
   }
-  suppressPackageStartupMessages(library(CompoundVision3D))
+  suppressPackageStartupMessages(library(CV3D))
 
   # Required dependencies used directly here.
   suppressPackageStartupMessages(requireNamespace("readr"))

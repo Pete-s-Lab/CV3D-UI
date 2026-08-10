@@ -14,7 +14,7 @@ safe_require("jsonlite")
 safe_require("readr")
 safe_require("dplyr")
 safe_require("tibble")
-safe_require("CompoundVision3D")
+safe_require("CV3D")
 
 SCRIPT_VERSION <- "0.2.2-prefixed-files-um-sphere-front0"
 SCRIPT_NAME <- "CV3D_R_05C_projection.R"
@@ -195,7 +195,7 @@ make_latlon_png <- function(df, path, cv_id, eye) {
 }
 
 extract_intersection_xyz <- function(inter, point, vec) {
-  # CompoundVision3D::vector.sphere.intersect usually returns x/y/z roots as a list.
+  # CV3D::vector.sphere.intersect usually returns x/y/z roots as a list.
   # Prefer the closest intersection in the forward normal-vector direction.
   candidates <- NULL
   if (is.list(inter) && length(inter) >= 3) {
@@ -257,7 +257,7 @@ main <- function() {
     point <- c(out$x_global[i], out$y_global[i], out$z_global[i])
     vec <- c(out$norm.x_global[i], out$norm.y_global[i], out$norm.z_global[i])
     if (!all(is.finite(point)) || !all(is.finite(vec))) next
-    inter <- CompoundVision3D::vector.sphere.intersect(point = point, vector = vec, sphere.c = sphere_center, sphere.r = sphere_radius)
+    inter <- CV3D::vector.sphere.intersect(point = point, vector = vec, sphere.c = sphere_center, sphere.r = sphere_radius)
     xyz <- extract_intersection_xyz(inter, point, vec)
     out$corn.proj.x[i] <- xyz[1]
     out$corn.proj.y[i] <- xyz[2]
@@ -265,7 +265,7 @@ main <- function() {
     out$projection_ray_length_um[i] <- sqrt(sum((xyz - point)^2))
   }
 
-  latlon <- CompoundVision3D::convert_to_latlon(x = out$corn.proj.x, y = out$corn.proj.y, z = out$corn.proj.z)
+  latlon <- CV3D::convert_to_latlon(x = out$corn.proj.x, y = out$corn.proj.y, z = out$corn.proj.z)
   out$latitude <- latlon$latitude
   out$longitude <- wrap_longitude(latlon$longitude + 90)
 

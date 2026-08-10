@@ -1,6 +1,6 @@
 ---
-title: "CV3D (CompoundVision3D) UI Tutorial"
-subtitle: "Workflow guide for image-volume based compound-eye analysis"
+title: "CV3D UI Tutorial"
+subtitle: "Workflow guide for three-dimensional compound-eye analysis"
 author: "Peter T. Rühr"
 date: "`r Sys.Date()`"
 output:
@@ -19,7 +19,7 @@ header-includes:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
-This tutorial describes the current CV3D UI workflow from raw image-volume data to checked facet positions, head landmarks, optical metrics, corneal projections, mirroring, and analysis-ready export. It is written for external beta testers using the bundled application.
+This tutorial describes the current CV3D UI workflow from raw image-volume or 3D-scanning data to checked facet positions, head landmarks, optical metrics, corneal projections, mirroring, and analysis-ready export.
 
 > **Scope**  
 > This guide focuses on the image-volume workflow using Fiji/ImageJ, Blender, R, and the CV3D R package. STL-source datasets are mentioned briefly, but the main tutorial assumes that the dataset starts from an image stack or volume.
@@ -32,7 +32,7 @@ CV3D is an interactive workflow for extracting compound-eye surface information 
 
 - **Fiji/ImageJ** for image-volume preprocessing and STL extraction.
 - **Blender** for manual cornea extraction, facet-position checking, and head landmarking.
-- **R** and the **CompoundVision3D R package** for local-height calculations, thresholding, candidate detection, optical metrics, coordinate rotation, corneal projections, and visual quality control.
+- **R** and the **CV3D R package** for local-height calculations, thresholding, candidate detection, optical metrics, coordinate rotation, corneal projections, and visual quality control.
 
 The main workflow is:
 
@@ -67,7 +67,7 @@ Install the following before using the UI:
 2. **Fiji/ImageJ**.
 3. **Blender**.
 4. **R** with access to `Rscript.exe`.
-5. The **CompoundVision3D R package**, installed from GitHub through the app settings.
+5. The **CV3D R package**, installed from GitHub via `devtools::install_github("Pete-s-Lab/CV3D")`.
 
 On Windows, typical executable paths look like:
 
@@ -160,7 +160,7 @@ Then click:
 Check R setup
 ```
 
-If the CompoundVision3D R package is missing, use:
+If the CV3D R package is missing, use:
 
 ```text
 Install/update from GitHub
@@ -169,7 +169,7 @@ Install/update from GitHub
 The default GitHub repository is:
 
 ```text
-Pete-s-Lab/CompoundVision3D
+Pete-s-Lab/CV3D
 ```
 
 ```{r fig-04-settings-page, fig.cap="Settings page. Only executable paths usually need to be set manually; helper scripts can be loaded from the bundled folder.", out.width="66%", fig.align="center", fig.pos="H"}
@@ -1094,7 +1094,7 @@ If it was saved into the parent folder or with a different name, move or rename 
 Open the right sidebar in the 3D View. The panel category is:
 
 ```text
-CompoundVision3D
+CV3D
 ```
 
 ## Step 03A is disabled
@@ -1126,7 +1126,7 @@ CVxxxx_CV3D/eyeX/04_CVxxxx_eyeX_facet_positions.csv
 Check:
 
 - Rscript executable path
-- CompoundVision3D R package installation
+- CV3D R package installation
 - helper-script paths
 - stdout/stderr logs in the eye-specific `logs/` folder
 

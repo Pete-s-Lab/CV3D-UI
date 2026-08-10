@@ -1,5 +1,5 @@
 /*
- * CompoundVision3D ImageJ/Fiji mesh extraction macro
+ * CV3D ImageJ/Fiji mesh extraction macro
  *
  * CV3D-integrated draft.
  *
@@ -444,7 +444,7 @@ preview_final_mb = "NA";
 writeMeshStatus("running", "CV3D mesh extraction macro started.");
 
 print("************************************");
-print("CompoundVision3D ImageJ mesh extraction");
+print("CV3D ImageJ mesh extraction");
 print("script_version = " + script_version);
 print("cv_id = " + cv_id);
 print("target = " + target);

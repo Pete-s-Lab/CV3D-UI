@@ -3,9 +3,9 @@
 # Usage:
 #   Rscript CV3D_R_step03C_facet_candidate_condensation.R <task_json>
 #
-# This runner intentionally keeps the scientific logic in the CompoundVision3D
+# This runner intentionally keeps the scientific logic in the CV3D
 # package. It only reads the task JSON, calls
-# CompoundVision3D::find_facet_candidates_condensed(), and writes outputs/status.
+# CV3D::find_facet_candidates_condensed(), and writes outputs/status.
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) {
@@ -24,7 +24,7 @@ safe_require <- function(pkg) {
 safe_require("jsonlite")
 safe_require("readr")
 safe_require("dplyr")
-safe_require("CompoundVision3D")
+safe_require("CV3D")
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
 status_file <- task$status_file_abs
@@ -44,9 +44,9 @@ write_status <- function(status, message, extra = list()) {
 }
 
 main <- function() {
-  if (!exists("find_facet_candidates_condensed", where = asNamespace("CompoundVision3D"), inherits = FALSE)) {
+  if (!exists("find_facet_candidates_condensed", where = asNamespace("CV3D"), inherits = FALSE)) {
     stop(
-      "CompoundVision3D::find_facet_candidates_condensed() was not found. ",
+      "CV3D::find_facet_candidates_condensed() was not found. ",
       "Install/update the package version that contains the 03C condensation function.",
       call. = FALSE
     )
@@ -73,8 +73,8 @@ main <- function() {
     )
   }
 
-  message("Running CompoundVision3D::find_facet_candidates_condensed() ...")
-  result <- CompoundVision3D::find_facet_candidates_condensed(
+  message("Running CV3D::find_facet_candidates_condensed() ...")
+  result <- CV3D::find_facet_candidates_condensed(
     df = df,
     coord_cols = c("x", "y", "z"),
     height_col = "height_value",

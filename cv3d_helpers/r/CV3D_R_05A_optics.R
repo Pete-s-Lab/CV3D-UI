@@ -14,7 +14,7 @@ safe_require("jsonlite")
 safe_require("readr")
 safe_require("dplyr")
 safe_require("tibble")
-safe_require("CompoundVision3D")
+safe_require("CV3D")
 
 SCRIPT_VERSION <- "0.1.1-stepwise-numeric-internal-ids"
 SCRIPT_NAME <- "CV3D_R_05A_optics.R"
@@ -114,14 +114,14 @@ main <- function() {
   facet_size <- as.numeric(task$parameters$facet_size_estimate %||% 14)
   if (!is.finite(facet_size) || facet_size <= 0) facet_size <- 14
 
-  message("Calculating optical metrics stepwise with CompoundVision3D package functions.")
+  message("Calculating optical metrics stepwise with CV3D package functions.")
   message("Facet count: ", nrow(facet_df))
   message("Edge tolerance: ", edge_tol)
   message("Cores: ", cores)
   message("Facet-size estimate: ", facet_size)
 
   message("Step 05A.1: find_neighbours().")
-  neighbours <- CompoundVision3D::find_neighbours(
+  neighbours <- CV3D::find_neighbours(
     df = facet_df,
     edge_tol = edge_tol
   )
@@ -132,7 +132,7 @@ main <- function() {
   }
 
   message("Step 05A.2: calculate_facet_size().")
-  facet_sizes_raw <- CompoundVision3D::calculate_facet_size(neighbours)
+  facet_sizes_raw <- CV3D::calculate_facet_size(neighbours)
 
   df_w_sizes_raw <- neighbours %>%
     dplyr::left_join(
@@ -152,7 +152,7 @@ main <- function() {
   }
 
   message("Step 05A.3: get_facet_normals().")
-  normals <- CompoundVision3D::get_facet_normals(
+  normals <- CV3D::get_facet_normals(
     df = df_w_sizes,
     cores = cores,
     plot_file = NULL,
@@ -169,7 +169,7 @@ main <- function() {
     dplyr::left_join(normals %>% dplyr::select(dplyr::any_of(normal_cols)), by = "ID")
 
   message("Step 05A.4: get_optic_properties().")
-  optic_properties <- CompoundVision3D::get_optic_properties(
+  optic_properties <- CV3D::get_optic_properties(
     df = df_w_normals,
     cores = cores,
     plot_results = FALSE,

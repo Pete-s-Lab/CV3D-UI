@@ -1,4 +1,4 @@
-"""CompoundVision3D UI controller."""
+"""CV3D UI controller."""
 
 from __future__ import annotations
 
@@ -33,16 +33,17 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.83"
+APP_VERSION = "0.1.85"
 
 CHANGELOG = [
+    "0.1.85: Updated the UI and bundled helpers to use the renamed CV3D R package namespace and CV3D branding.",
     "0.1.83: Improved Results/Export QC PDF typography, path wrapping, PDF-safe status symbols, rotated table headers, and stricter equal-unit plot panels.",
     "0.1.82: Polished Results/Export QC PDF text/layout, removed landmark-reference panels, enforced equal-unit coordinate panels, and embeds 05C rgl snapshots.",
     "0.1.77: Set post-global-coordinate rgl camera from explicit screen-axis basis: x diagonal down-right, y diagonal up-right, z upward, with perspective.",
     "0.1.76: Adjusted post-global-coordinate rgl camera to x/y diagonal, z-up perspective view.",
     "0.1.75: Standardized the rgl camera for post-global-coordinate 05B/05C QC views.",
     "0.1.74: Restored eye-wise 05B/05C QC buttons to single-eye plotting; only combined buttons plot both eyes.",
-    "0.1.73: Updated the default GitHub repository to Pete-s-Lab/CV3D while keeping the R package namespace CompoundVision3D.",
+    "0.1.73: Updated the default GitHub repository to Pete-s-Lab/CV3D.",
     "0.1.81: Fixed Results/Export report path handling so final-export files are not nested twice.",
     "0.1.80: Results/Export QC PDF now uses cleaner vector-style QC plots, optional fresh 05C rgl snapshots, and combined plus eye-wise sections.",
     "0.1.72: Results/Export now reports the absolute export folder and creates the QC PDF without requiring matplotlib.",
@@ -474,7 +475,7 @@ def load_app_settings() -> Dict[str, Any]:
         settings.setdefault("blender_script_path", "")
         settings.setdefault("rscript_executable", "")
         settings.setdefault("r_github_repo", "Pete-s-Lab/CV3D")
-        if settings.get("r_github_repo") == "Pete-s-Lab/CompoundVision3D":
+        if settings.get("r_github_repo") == "Pete-s-Lab/CV3D":
             settings["r_github_repo"] = "Pete-s-Lab/CV3D"
         settings.setdefault("r_step03a_script_path", "")
         settings.setdefault("r_step03a2_script_path", "")
@@ -1540,7 +1541,7 @@ class FacetCandidateCondensationDialog(QDialog):
 class CV3DMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CompoundVision3D")
+        self.setWindowTitle("CV3D")
         self.resize(980, 760)
 
         self.settings = load_app_settings()
@@ -1884,6 +1885,7 @@ class CV3DMainWindow(QMainWindow):
         grid = QGridLayout()
         self.r_analysis_labels: Dict[str, Dict[str, QLabel]] = {eye: {} for eye in EYES}
         self.r_analysis_buttons: Dict[str, Dict[str, QPushButton]] = {eye: {} for eye in EYES}
+        self.r_analysis_button_reason_labels: Dict[str, Dict[str, QLabel]] = {eye: {} for eye in EYES}
         self.r_analysis_plot_buttons: Dict[str, Dict[str, QPushButton]] = {eye: {} for eye in EYES}
 
         analysis_specs = [
@@ -1901,10 +1903,16 @@ class CV3DMainWindow(QMainWindow):
                 label.setWordWrap(True)
                 btn = QPushButton(f"{button_text}: {eye}")
                 btn.clicked.connect(lambda _, e=eye, f=func: f(e))
+                reason_label = QLabel("")
+                reason_label.setWordWrap(True)
+                reason_label.setStyleSheet("color: #7a3b00; font-size: 11px; margin-left: 8px;")
+                reason_label.hide()
                 self.r_analysis_labels[eye][step] = label
                 self.r_analysis_buttons[eye][step] = btn
+                self.r_analysis_button_reason_labels[eye][step] = reason_label
                 v.addWidget(label)
                 v.addWidget(btn)
+                v.addWidget(reason_label)
 
             plot_separator = QFrame()
             plot_separator.setFrameShape(QFrame.Shape.HLine)
@@ -2830,6 +2838,26 @@ class CV3DMainWindow(QMainWindow):
                 self.mirror_target_combo.setCurrentIndex(i)
                 return
 
+    def r_analysis_runner_diagnostic(self, runner_key: str, runner_path: Optional[Path]) -> str:
+        configured = self.settings.get(runner_key, "") if runner_key else ""
+        bundled = bundled_helper_abs_path(runner_key) if runner_key else None
+        parts = []
+        parts.append(f"configured setting = {configured}" if configured else "configured setting is empty")
+        parts.append(f"bundled fallback = {bundled}" if bundled is not None else "no bundled fallback was found")
+        parts.append(f"resolved runner = {runner_path}" if runner_path is not None else "resolved runner = missing")
+        return "; ".join(parts)
+
+    def r_analysis_disabled_reason_text(self, eye: str, step: str, present: bool, input_problems: List[str], runner_key: str, runner_path: Optional[Path]) -> str:
+        reasons = []
+        if not present:
+            reasons.append(f"{eye} is not marked as present in the project config.")
+        reasons.extend(str(p) for p in (input_problems or []))
+        if runner_key and runner_path is None:
+            reasons.append(f"R runner missing for {STEP_LABELS.get(step, step)}: {self.r_analysis_runner_diagnostic(runner_key, runner_path)}")
+        if not reasons:
+            return ""
+        return "Disabled because:\n" + "\n".join(f"- {r}" for r in reasons)
+
     def refresh_r_analysis_page(self) -> None:
         if not hasattr(self, "r_analysis_summary"):
             return
@@ -2840,9 +2868,13 @@ class CV3DMainWindow(QMainWindow):
                 for eye in EYES:
                     for step, label in self.r_analysis_labels.get(eye, {}).items():
                         label.setText(f"{STEP_LABELS[step]}: ○ not started")
-                    for button in self.r_analysis_buttons.get(eye, {}).values():
+                    for step, button in self.r_analysis_buttons.get(eye, {}).items():
                         button.setEnabled(False)
                         button.setToolTip("No dataset loaded.")
+                        reason_label = getattr(self, "r_analysis_button_reason_labels", {}).get(eye, {}).get(step)
+                        if reason_label is not None:
+                            reason_label.setText("Disabled: no dataset loaded.")
+                            reason_label.show()
                     for button in getattr(self, "r_analysis_plot_buttons", {}).get(eye, {}).values():
                         button.setEnabled(False)
                         button.setToolTip("No dataset loaded.")
@@ -2905,8 +2937,20 @@ class CV3DMainWindow(QMainWindow):
 
                 btn = self.r_analysis_buttons.get(eye, {}).get(step)
                 if btn is not None:
-                    btn.setEnabled(present and not input_problems and runner_path is not None)
+                    enabled = present and not input_problems and runner_path is not None
+                    btn.setEnabled(enabled)
                     btn.setToolTip("\n".join(tooltip_lines))
+                    reason_label = getattr(self, "r_analysis_button_reason_labels", {}).get(eye, {}).get(step)
+                    if reason_label is not None:
+                        if enabled:
+                            reason_label.clear()
+                            reason_label.hide()
+                        else:
+                            reason_text = self.r_analysis_disabled_reason_text(eye, step, present, input_problems, runner_key, runner_path)
+                            if not reason_text:
+                                reason_text = "Disabled because the required state could not be verified."
+                            reason_label.setText(reason_text)
+                            reason_label.show()
 
             qc_runner = self.resolve_r_analysis_runner("r_step05a_qc_plot_script_path")
             qc05b_runner = self.resolve_r_analysis_runner("r_step05b_qc_plot_script_path")
@@ -3931,7 +3975,7 @@ class CV3DMainWindow(QMainWindow):
             f"Output STL: {files.get('cornea_stl_file')}\\n"
             f"Output blend: {files.get('cornea_blend_file')}\\n"
             f"Launch mode: {'open existing .blend' if opening_existing_blend else 'start new from source STL'}\\n\\n"
-            "In Blender, use the CompoundVision3D panel to export the selected cornea object, then close Blender.",
+            "In Blender, use the CV3D panel to export the selected cornea object, then close Blender.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -4075,12 +4119,12 @@ class CV3DMainWindow(QMainWindow):
         expr = (
             'cat(R.version.string, "\\n"); '
             'cat("Rscript:", file.path(R.home("bin"), "Rscript"), "\\n"); '
-            'ok <- requireNamespace("CompoundVision3D", quietly=TRUE); '
-            'cat("CompoundVision3D installed:", ok, "\\n"); '
-            'if (ok) cat("CompoundVision3D version:", as.character(utils::packageVersion("CompoundVision3D")), "\\n")'
+            'ok <- requireNamespace("CV3D", quietly=TRUE); '
+            'cat("CV3D installed:", ok, "\\n"); '
+            'if (ok) cat("CV3D version:", as.character(utils::packageVersion("CV3D")), "\\n")'
         )
         ok, output = self.run_rscript_expression(expr, "Check R setup")
-        QMessageBox.information(self, "R setup check", f"GitHub repo setting: {repo}\nR package namespace: CompoundVision3D\n\n{output}")
+        QMessageBox.information(self, "R setup check", f"GitHub repo setting: {repo}\nR package namespace: CV3D\n\n{output}")
 
     def install_or_update_r_package_from_github(self) -> bool:
         self.r_setup_values_from_ui()
@@ -4089,7 +4133,7 @@ class CV3DMainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Install/update CV3D R package from GitHub",
-            "This will run Rscript and install/update the CompoundVision3D R package from the CV3D GitHub repository.\n\n"
+            "This will run Rscript and install/update the CV3D R package from the CV3D GitHub repository.\n\n"
             f"Repository: {repo}\n\n"
             "This may take a while and may install missing R dependencies.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
@@ -4101,7 +4145,7 @@ class CV3DMainWindow(QMainWindow):
             'options(repos=c(CRAN="https://cloud.r-project.org")); '
             'if (!requireNamespace("remotes", quietly=TRUE)) install.packages("remotes"); '
             f'remotes::install_github("{repo}", upgrade="never", dependencies=TRUE); '
-            'cat("CompoundVision3D installed/updated. Version:", as.character(utils::packageVersion("CompoundVision3D")), "\\n")'
+            'cat("CV3D installed/updated. Version:", as.character(utils::packageVersion("CV3D")), "\\n")'
         )
         ok, output = self.run_rscript_expression(expr, "Install/update R package")
         if ok:
@@ -4114,18 +4158,18 @@ class CV3DMainWindow(QMainWindow):
         self.r_setup_values_from_ui()
         repo = self.settings.get("r_github_repo", "Pete-s-Lab/CV3D")
         expr = (
-            'ok <- requireNamespace("CompoundVision3D", quietly=TRUE); '
+            'ok <- requireNamespace("CV3D", quietly=TRUE); '
             'if (!ok) quit(status=2, save="no"); '
-            'cat("CompoundVision3D version:", as.character(utils::packageVersion("CompoundVision3D")), "\\n")'
+            'cat("CV3D version:", as.character(utils::packageVersion("CV3D")), "\\n")'
         )
-        ok, output = self.run_rscript_expression(expr, "Check CompoundVision3D package")
+        ok, output = self.run_rscript_expression(expr, "Check CV3D package")
         if ok:
             return True
 
         reply = QMessageBox.question(
             self,
-            "CompoundVision3D R package missing",
-            "Rscript is available, but the CompoundVision3D R package is not installed.\n\n"
+            "CV3D R package missing",
+            "Rscript is available, but the CV3D R package is not installed.\n\n"
             f"Repository: {repo}\n\n"
             "Install it from GitHub now?",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
@@ -4981,7 +5025,7 @@ class CV3DMainWindow(QMainWindow):
             f"Input cornea STL: {files.get('cornea_stl_file')}\n"
             f"Facet size estimate: {task.get('facet_size_estimate')}\n"
             f"Max cores: {task.get('max_cores')}\n"
-            f"R package: CompoundVision3D from {self.settings.get('r_github_repo', 'Pete-s-Lab/CV3D')}\n\n"
+            f"R package: CV3D from {self.settings.get('r_github_repo', 'Pete-s-Lab/CV3D')}\n\n"
             "The GUI will wait until Rscript finishes.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
@@ -7699,7 +7743,7 @@ class CV3DMainWindow(QMainWindow):
             f"CV ID: {cv_id}\nEye: {eye}\nBlend: {files['cornea_blend_file']}\n"
             f"Input candidates: {files['facet_candidates_file']}\n"
             f"Output facet positions: {files['facet_positions_file']}\n\n"
-            "When finished, use the CompoundVision3D panel in Blender to export facet positions, then close Blender.",
+            "When finished, use the CV3D panel in Blender to export facet positions, then close Blender.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -8907,7 +8951,7 @@ class CV3DMainWindow(QMainWindow):
             "active_export_eyes": self.active_export_eyes(),
             "facet_rows": len(facet_rows),
             "summary_rows": len(summary_rows),
-            "notes": "CompoundVision3D analysis-ready export. CPD is exported under the exact column name CPD.",
+            "notes": "CV3D analysis-ready export. CPD is exported under the exact column name CPD.",
         }
         write_json(self.analysis_folder / out["metadata_json"]["file"], metadata)
         created.append(out["metadata_json"]["file"])
@@ -8946,7 +8990,7 @@ class CV3DMainWindow(QMainWindow):
             messages.append("Fresh 05C rgl snapshots skipped because Rscript or the 05C QC runner is not configured.")
             return messages
         if not self.ensure_r_package_installed():
-            messages.append("Fresh 05C rgl snapshots skipped because the CompoundVision3D R package is unavailable.")
+            messages.append("Fresh 05C rgl snapshots skipped because the CV3D R package is unavailable.")
             return messages
 
         cv_id = self.config["dataset_identity"]["cv_id"]
@@ -9690,7 +9734,7 @@ class CV3DMainWindow(QMainWindow):
 
         created_at = now()
         pages = []
-        cover = new_page('CompoundVision3D analysis-ready export and QC report', 'Analysis-ready outputs and QC summary')
+        cover = new_page('CV3D analysis-ready export and QC report', 'Analysis-ready outputs and QC summary')
         cover_lines = [
             f'CV ID: {cv_id}',
             f'Created: {created_at}',
@@ -9734,7 +9778,7 @@ class CV3DMainWindow(QMainWindow):
         manifest_rows = self.read_csv_rows_rel(out['export_manifest']['file'])
         html = f"""<!doctype html>
 <html><head><meta charset=\"utf-8\"><title>{cv_id} CV3D analysis-ready export</title></head>
-<body><h1>{cv_id} — CompoundVision3D analysis-ready export</h1>
+<body><h1>{cv_id} — CV3D analysis-ready export</h1>
 <p>Created: {created_at}</p>
 <p>Facet rows: {len(facet_rows)}</p>
 <p>Export eyes: {', '.join(self.active_export_eyes())}</p>

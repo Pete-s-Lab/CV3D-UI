@@ -1,3 +1,3 @@
-# CompoundVision3D UI 
+# CV3D UI 
 
 no readme yet ;-)

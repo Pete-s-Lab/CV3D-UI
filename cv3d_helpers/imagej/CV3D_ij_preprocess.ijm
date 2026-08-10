@@ -1,5 +1,5 @@
 /*
- * CompoundVision3D ImageJ/Fiji preprocessing macro
+ * CV3D ImageJ/Fiji preprocessing macro
  *
  * CV3D-integrated draft.
  *
@@ -341,7 +341,7 @@ extract_surfaces = "false";
 writeCv3dStatus("running", "ImageJ preprocessing macro started. Mesh extraction is handled separately.");
 
 print("************************************");
-print("CompoundVision3D ImageJ preprocessing");
+print("CV3D ImageJ preprocessing");
 print("script_version = " + script_version);
 print("cv_id = " + cv_id);
 print("raw/source folder = " + parent_dir_path);

@@ -20,7 +20,7 @@ safe_require("jsonlite")
 safe_require("readr")
 safe_require("dplyr")
 safe_require("tibble")
-safe_require("CompoundVision3D")
+safe_require("CV3D")
 
 SCRIPT_VERSION <- "0.2.3-croplog-encoding-safe-roi-translation"
 SCRIPT_NAME <- "CV3D_R_05B_align.R"
@@ -395,8 +395,8 @@ main <- function() {
   priority <- as.character(task$parameters$priority %||% "RL")
   if (!priority %in% c("RL", "AP")) priority <- "RL"
 
-  message("Running CompoundVision3D::align_pointcloud() with priority=", priority)
-  aligned <- CompoundVision3D::align_pointcloud(
+  message("Running CV3D::align_pointcloud() with priority=", priority)
+  aligned <- CV3D::align_pointcloud(
     df = combined,
     ref_x = "x", ref_y = "y", ref_z = "z",
     data_x = "norm.x", data_y = "norm.y", data_z = "norm.z",

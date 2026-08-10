@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "CompoundVision3D",
+    "name": "CV3D",
     "blender": (3, 0, 0),
     "category": "View3D",
     "author": "Peter T. Rühr",
     "version": (0, 0, 9031),
-    "description": "CompoundVision3D Blender helper. Interactive CV3D cornea extraction and later facet-position helper tools.",
+    "description": "CV3D Blender helper. Interactive CV3D cornea extraction and later facet-position helper tools.",
 }
 
 import bpy
@@ -232,7 +232,7 @@ def activate_cv3d_sidebar():
 
     Blender exposes reliable control for showing the sidebar, but not a stable
     public API for selecting a specific sidebar category tab. The panel category
-    is set to 'CompoundVision3D', so once the sidebar is visible, the tab is
+    is set to 'CV3D', so once the sidebar is visible, the tab is
     available and Blender usually keeps the last active category per workspace.
     """
     setup_view()
@@ -1020,11 +1020,11 @@ class CV3D_OT_ExportLandmarks(bpy.types.Operator):
 # ---------------------------------------------------------------------
 
 class CV3D_PT_Panel(bpy.types.Panel):
-    bl_label = "CompoundVision3D"
+    bl_label = "CV3D"
     bl_idname = "CV3D_PT_Panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CompoundVision3D"
+    bl_category = "CV3D"
 
     def draw(self, context):
         layout = self.layout
