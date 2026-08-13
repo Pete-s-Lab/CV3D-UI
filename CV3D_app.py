@@ -34,9 +34,12 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.115"
+APP_VERSION = "0.1.118"
 
 CHANGELOG = [
+    "0.1.118: Fixed the double-click launcher so pythonw starts CV3D with a normal visible GUI window while helper subprocesses remain console-free.",
+    "0.1.117: Suppressed Windows console creation for external helper processes and cached successful CV3D R-package validation for the app session to remove the redundant Rscript check before every R action.",
+    "0.1.116: Added a Windows double-click launcher that locates a suitable Python/PySide6 installation and starts CV3D without a console window.",
     "0.1.115: Removed raw facet-size plotting, added optional facet-ID labels to Choose facet value plots, and corrected 05C PDF snapshot sphere scaling/aspect-preserving placement.",
     "0.1.114: Renamed 05A plot actions, moved normals into Choose facet value, defaulted optional rgl views to on, and added a normal-vector visibility toggle with a dedicated normals-options dialog.",
     "0.1.113: Defaulted facet-sphere diameter scaling to 2x and consolidated plot inputs into one options dialog per plot action; dataset creation source inputs are also collected in one dialog.",
@@ -1916,6 +1919,10 @@ class CV3DMainWindow(QMainWindow):
         self.status: Optional[Dict[str, Any]] = None
         self.registry: Optional[Dict[str, Any]] = None
         self._updating_dataset_selector = False
+        # R namespace availability only needs to be verified once per Rscript
+        # executable during a CV3D session. Re-check after the configured
+        # executable changes or after an explicit package installation/update.
+        self._verified_r_package_rscript: Optional[str] = None
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -1992,13 +1999,33 @@ class CV3DMainWindow(QMainWindow):
         self.process_wait_label.setVisible(bool(waiting))
         QApplication.processEvents()
 
+    @staticmethod
+    def no_console_process_kwargs(kwargs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Return subprocess kwargs that suppress console allocation on Windows.
+
+        CV3D is normally started with pythonw.exe. Console-mode child processes
+        such as Rscript.exe would otherwise create their own terminal window.
+        CREATE_NO_WINDOW suppresses that console only; GUI windows opened by
+        ImageJ, Blender, or rgl remain available.
+        """
+        out = dict(kwargs or {})
+        if os.name == "nt":
+            create_no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if create_no_window:
+                out["creationflags"] = int(out.get("creationflags", 0)) | create_no_window
+        return out
+
     def run_blocking_process(self, *args, **kwargs):
         """Run an external process while making the UI's blocking state explicit."""
         self.set_waiting_for_process(True)
         try:
-            return subprocess.run(*args, **kwargs)
+            return subprocess.run(*args, **self.no_console_process_kwargs(kwargs))
         finally:
             self.set_waiting_for_process(False)
+
+    def start_background_process(self, cmd, **kwargs):
+        """Start an external helper without creating a Windows console window."""
+        return subprocess.Popen(cmd, **self.no_console_process_kwargs(kwargs))
 
     # ---------- UI builders ----------
 
@@ -4499,6 +4526,7 @@ class CV3DMainWindow(QMainWindow):
         if file_path:
             self.rscript_executable_edit.setText(file_path)
             self.settings["rscript_executable"] = file_path
+            self._verified_r_package_rscript = None
             save_app_settings(self.settings)
             self.refresh_settings_page()
 
@@ -4589,14 +4617,33 @@ class CV3DMainWindow(QMainWindow):
         )
         ok, output = self.run_rscript_expression(expr, "Install/update R package")
         if ok:
+            rscript = configured_file_path(self.settings.get("rscript_executable", ""))
+            self._verified_r_package_rscript = str(rscript.resolve()) if rscript is not None else None
             QMessageBox.information(self, "R package installed/updated", output)
         else:
+            self._verified_r_package_rscript = None
             QMessageBox.warning(self, "R package installation failed", output)
         return ok
 
     def ensure_r_package_installed(self) -> bool:
         self.r_setup_values_from_ui()
         repo = self.settings.get("r_github_repo", "Pete-s-Lab/CV3D")
+        rscript = configured_file_path(self.settings.get("rscript_executable", ""))
+        if rscript is None:
+            self._verified_r_package_rscript = None
+            QMessageBox.warning(
+                self,
+                "Rscript executable missing",
+                "Set a valid Rscript executable in Settings first.\n\n"
+                "This should point to Rscript.exe, not R.exe, Rgui.exe, RStudio, or the R installation folder."
+            )
+            self.nav.setCurrentRow(7)
+            return False
+
+        cache_key = str(rscript.resolve())
+        if self._verified_r_package_rscript == cache_key:
+            return True
+
         expr = (
             'ok <- requireNamespace("CV3D", quietly=TRUE); '
             'if (!ok) quit(status=2, save="no"); '
@@ -4604,6 +4651,7 @@ class CV3DMainWindow(QMainWindow):
         )
         ok, output = self.run_rscript_expression(expr, "Check CV3D package")
         if ok:
+            self._verified_r_package_rscript = cache_key
             return True
 
         reply = QMessageBox.question(
@@ -5324,7 +5372,7 @@ class CV3DMainWindow(QMainWindow):
                 out = stdout_path.open("w", encoding="utf-8", errors="replace")
                 err = stderr_path.open("w", encoding="utf-8", errors="replace")
                 try:
-                    process = subprocess.Popen(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                    process = self.start_background_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
                 finally:
                     out.close()
                     err.close()
@@ -7032,7 +7080,7 @@ class CV3DMainWindow(QMainWindow):
                 out = stdout_path.open("w", encoding="utf-8", errors="replace")
                 err = stderr_path.open("w", encoding="utf-8", errors="replace")
                 try:
-                    process = subprocess.Popen(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                    process = self.start_background_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
                 finally:
                     out.close()
                     err.close()
@@ -7206,8 +7254,6 @@ class CV3DMainWindow(QMainWindow):
         if runner is None:
             QMessageBox.warning(self, "05A QC plot runner missing", "Could not find the bundled or configured 05A QC plot runner.")
             self.nav.setCurrentRow(7)
-            return
-        if not self.ensure_r_package_installed():
             return
 
         cv_id = self.config["dataset_identity"]["cv_id"]
@@ -7427,8 +7473,6 @@ class CV3DMainWindow(QMainWindow):
             QMessageBox.warning(self, "05B QC plot runner missing", "Could not find the bundled or configured 05B QC plot runner.")
             self.nav.setCurrentRow(7)
             return
-        if not self.ensure_r_package_installed():
-            return
 
         cv_id = self.config["dataset_identity"]["cv_id"]
         eyes_to_plot = []
@@ -7594,8 +7638,6 @@ class CV3DMainWindow(QMainWindow):
         if runner is None:
             QMessageBox.warning(self, "05C QC plot runner missing", "Could not find the bundled or configured 05C QC plot runner.")
             self.nav.setCurrentRow(7)
-            return
-        if not self.ensure_r_package_installed():
             return
 
         cv_id = self.config["dataset_identity"]["cv_id"]
@@ -9540,9 +9582,6 @@ class CV3DMainWindow(QMainWindow):
         runner = self.resolve_r_analysis_runner("r_step05c_qc_plot_script_path")
         if rscript is None or runner is None:
             messages.append("Fresh 05C rgl snapshots skipped because Rscript or the 05C QC runner is not configured.")
-            return messages
-        if not self.ensure_r_package_installed():
-            messages.append("Fresh 05C rgl snapshots skipped because the CV3D R package is unavailable.")
             return messages
 
         cv_id = self.config["dataset_identity"]["cv_id"]
