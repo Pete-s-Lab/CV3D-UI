@@ -16,7 +16,7 @@ safe_require("dplyr")
 safe_require("tibble")
 safe_require("CV3D")
 
-SCRIPT_VERSION <- "0.2.2-prefixed-files-um-sphere-front0"
+SCRIPT_VERSION <- "0.3.0-view-angles"
 SCRIPT_NAME <- "CV3D_R_05C_projection.R"
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
@@ -48,10 +48,6 @@ write_csv_safe <- function(df, path) {
   readr::write_csv(df, path)
 }
 
-wrap_longitude <- function(lon) {
-  lon <- suppressWarnings(as.numeric(lon))
-  ((lon + 180) %% 360) - 180
-}
 
 rescale01 <- function(x) {
   x <- suppressWarnings(as.numeric(x))
@@ -129,20 +125,20 @@ make_projection_png <- function(df, view_name, path, title) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
 
   view_defs <- list(
-    front = list(x = "corn.proj.x", y = "corn.proj.z", sx = 1,  sy = 1,  xlab = "x projection (um)",  ylab = "z projection (um)"),
-    back  = list(x = "corn.proj.x", y = "corn.proj.z", sx = -1, sy = 1,  xlab = "-x projection (um)", ylab = "z projection (um)"),
-    left  = list(x = "corn.proj.y", y = "corn.proj.z", sx = 1,  sy = 1,  xlab = "y projection (um)",  ylab = "z projection (um)"),
-    right = list(x = "corn.proj.y", y = "corn.proj.z", sx = -1, sy = 1,  xlab = "-y projection (um)", ylab = "z projection (um)"),
-    top   = list(x = "corn.proj.x", y = "corn.proj.y", sx = 1,  sy = 1,  xlab = "x projection (um)",  ylab = "y projection (um)"),
-    bottom = list(x = "corn.proj.x", y = "corn.proj.y", sx = 1, sy = -1, xlab = "x projection (um)",  ylab = "-y projection (um)")
+    front = list(x = "corn.proj.x", y = "corn.proj.z", sx = 1,  sy = 1,  xlab = "x projection (µm)",  ylab = "z projection (µm)"),
+    back  = list(x = "corn.proj.x", y = "corn.proj.z", sx = -1, sy = 1,  xlab = "-x projection (µm)", ylab = "z projection (µm)"),
+    left  = list(x = "corn.proj.y", y = "corn.proj.z", sx = 1,  sy = 1,  xlab = "y projection (µm)",  ylab = "z projection (µm)"),
+    right = list(x = "corn.proj.y", y = "corn.proj.z", sx = -1, sy = 1,  xlab = "-y projection (µm)", ylab = "z projection (µm)"),
+    top   = list(x = "corn.proj.x", y = "corn.proj.y", sx = 1,  sy = 1,  xlab = "x projection (µm)",  ylab = "y projection (µm)"),
+    bottom = list(x = "corn.proj.x", y = "corn.proj.y", sx = 1, sy = -1, xlab = "x projection (µm)",  ylab = "-y projection (µm)")
   )
   vd <- view_defs[[view_name]] %||% view_defs$top
 
   x <- suppressWarnings(as.numeric(df[[vd$x]])) * vd$sx
   y <- suppressWarnings(as.numeric(df[[vd$y]])) * vd$sy
-  colour_value <- if ("projection_ray_length_um" %in% names(df)) df$projection_ray_length_um else df$latitude
+  colour_value <- if ("projection_ray_length_um" %in% names(df)) df$projection_ray_length_um else df$elevation
   mapped <- map_colors(colour_value)
-  cex <- if ("size" %in% names(df)) point_cex_from_size(df$size) else rep(0.65, length(x))
+  cex <- if ("facet_size_smoothed" %in% names(df)) point_cex_from_size(df$facet_size_smoothed) else rep(0.65, length(x))
 
   png(path, width = 1800, height = 1600, res = 220)
   op <- par(mar = c(4, 4, 4, 6))
@@ -161,18 +157,18 @@ make_projection_png <- function(df, view_name, path, title) {
   )
   grid(col = "grey88", lty = "dotted")
   points(x, y, pch = 16, cex = cex, col = mapped$cols)
-  colorbar_inset(colour_value, mapped$pal, "Ray length (um)")
+  colorbar_inset(colour_value, mapped$pal, "Ray length (µm)")
   mtext(sprintf("Projected facets: %s | sphere diameter: %.4g cm", sum(is.finite(x) & is.finite(y)), unique(df$projection_sphere_size_cm)[1]), side = 3, line = 0.25, cex = 0.78)
   invisible(path)
 }
 
-make_latlon_png <- function(df, path, cv_id, eye) {
+make_view_angles_png <- function(df, path, cv_id, eye) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
-  x <- suppressWarnings(as.numeric(df$longitude))
-  y <- suppressWarnings(as.numeric(df$latitude))
+  x <- suppressWarnings(as.numeric(df$azimuth))
+  y <- suppressWarnings(as.numeric(df$elevation))
   colour_value <- if ("projection_ray_length_um" %in% names(df)) df$projection_ray_length_um else seq_along(x)
   mapped <- map_colors(colour_value)
-  cex <- if ("size" %in% names(df)) point_cex_from_size(df$size) else rep(0.65, length(x))
+  cex <- if ("facet_size_smoothed" %in% names(df)) point_cex_from_size(df$facet_size_smoothed) else rep(0.65, length(x))
 
   png(path, width = 1800, height = 1200, res = 220)
   op <- par(mar = c(4, 4, 4, 6))
@@ -182,40 +178,16 @@ make_latlon_png <- function(df, path, cv_id, eye) {
     pch = 16,
     cex = cex,
     col = mapped$cols,
-    xlab = "longitude (deg)",
-    ylab = "latitude (deg)",
-    main = sprintf("%s %s - 05C corneal projection latitude/longitude", cv_id, eye),
+    xlab = "azimuth (deg)",
+    ylab = "elevation (deg)",
+    main = sprintf("%s %s - 05C corneal projection elevation/azimuth", cv_id, eye),
     xlim = plot_range(x),
     ylim = plot_range(y)
   )
   grid(col = "grey88", lty = "dotted")
   points(x, y, pch = 16, cex = cex, col = mapped$cols)
-  colorbar_inset(colour_value, mapped$pal, "Ray length (um)")
+  colorbar_inset(colour_value, mapped$pal, "Ray length (µm)")
   invisible(path)
-}
-
-extract_intersection_xyz <- function(inter, point, vec) {
-  # CV3D::vector.sphere.intersect usually returns x/y/z roots as a list.
-  # Prefer the closest intersection in the forward normal-vector direction.
-  candidates <- NULL
-  if (is.list(inter) && length(inter) >= 3) {
-    candidates <- cbind(as.numeric(inter[[1]]), as.numeric(inter[[2]]), as.numeric(inter[[3]]))
-  } else if (is.matrix(inter) || is.data.frame(inter)) {
-    m <- as.matrix(inter)
-    if (ncol(m) >= 3) candidates <- m[, 1:3, drop = FALSE]
-    if (nrow(m) >= 3 && is.null(candidates)) candidates <- t(m[1:3, , drop = FALSE])
-  }
-  if (is.null(candidates)) return(c(NA_real_, NA_real_, NA_real_))
-  candidates <- candidates[stats::complete.cases(candidates), , drop = FALSE]
-  if (nrow(candidates) == 0) return(c(NA_real_, NA_real_, NA_real_))
-  dots <- as.numeric((candidates - matrix(point, nrow = nrow(candidates), ncol = 3, byrow = TRUE)) %*% vec)
-  if (any(is.finite(dots) & dots > 0)) {
-    idxs <- which(is.finite(dots) & dots > 0)
-    idx <- idxs[which.min(dots[idxs])]
-  } else {
-    idx <- which.max(dots)
-  }
-  as.numeric(candidates[idx, ])
 }
 
 main <- function() {
@@ -232,17 +204,39 @@ main <- function() {
   }
   cp_diam_cm <- cp_diam_um / 10000
   sphere_radius <- cp_diam_um / 2
-  center_mode <- as.character(task$parameters$projection_center_mode %||% "eye_center")
+  center_mode <- as.character(task$parameters$projection_center_mode %||% "between_eyes")
 
   center_eye <- c(mean(df$x_global, na.rm = TRUE), mean(df$y_global, na.rm = TRUE), mean(df$z_global, na.rm = TRUE))
+  center_source <- "current_eye_centroid"
   if (center_mode == "eye_center") {
     sphere_center <- center_eye
   } else if (center_mode == "head_landmark_center") {
     sphere_center <- c(0, 0, 0)
+    center_source <- "global_anatomical_origin"
   } else {
-    sphere_center <- center_eye
-    sphere_center[1] <- 0
     center_mode <- "between_eyes"
+    other_path <- as.character(task$input_other_eye_global_coordinates_abs %||% "")
+    if (nzchar(other_path) && file.exists(other_path)) {
+      other_df <- suppressMessages(readr::read_csv(other_path, show_col_types = FALSE))
+      need_cols(other_df, c("x_global", "y_global", "z_global"), "Other-eye global-coordinate table")
+      other_center <- c(
+        mean(other_df$x_global, na.rm = TRUE),
+        mean(other_df$y_global, na.rm = TRUE),
+        mean(other_df$z_global, na.rm = TRUE)
+      )
+      if (all(is.finite(other_center))) {
+        sphere_center <- (center_eye + other_center) / 2
+        center_source <- "midpoint_of_both_eye_centroids"
+      } else {
+        sphere_center <- center_eye
+        sphere_center[1] <- 0
+        center_source <- "single_eye_midline_estimate"
+      }
+    } else {
+      sphere_center <- center_eye
+      sphere_center[1] <- 0
+      center_source <- "single_eye_midline_estimate"
+    }
   }
 
   message("Calculating corneal projection intersections with sphere diameter ", cp_diam_cm, " cm.")
@@ -250,33 +244,46 @@ main <- function() {
     dplyr::mutate(
       corn.proj.x = NA_real_, corn.proj.y = NA_real_, corn.proj.z = NA_real_,
       projection_ray_length_um = NA_real_,
-      latitude = NA_real_, longitude = NA_real_
+      elevation = NA_real_, azimuth = NA_real_
     )
 
   for (i in seq_len(nrow(out))) {
     point <- c(out$x_global[i], out$y_global[i], out$z_global[i])
     vec <- c(out$norm.x_global[i], out$norm.y_global[i], out$norm.z_global[i])
     if (!all(is.finite(point)) || !all(is.finite(vec))) next
-    inter <- CV3D::vector.sphere.intersect(point = point, vector = vec, sphere.c = sphere_center, sphere.r = sphere_radius)
-    xyz <- extract_intersection_xyz(inter, point, vec)
+    xyz <- CV3D::ray_sphere_intersection(
+      point = point,
+      direction = vec,
+      sphere_center = sphere_center,
+      sphere_radius = sphere_radius
+    )
     out$corn.proj.x[i] <- xyz[1]
     out$corn.proj.y[i] <- xyz[2]
     out$corn.proj.z[i] <- xyz[3]
-    out$projection_ray_length_um[i] <- sqrt(sum((xyz - point)^2))
+    if (all(is.finite(xyz))) {
+      out$projection_ray_length_um[i] <- sqrt(sum((xyz - point)^2))
+    }
   }
 
-  latlon <- CV3D::convert_to_latlon(x = out$corn.proj.x, y = out$corn.proj.y, z = out$corn.proj.z)
-  out$latitude <- latlon$latitude
-  out$longitude <- wrap_longitude(latlon$longitude + 90)
+  view_angles <- CV3D::cartesian_to_view_angles(
+    x = out$corn.proj.x,
+    y = out$corn.proj.y,
+    z = out$corn.proj.z,
+    center = sphere_center
+  )
+  out$elevation <- view_angles$elevation
+  out$azimuth <- view_angles$azimuth
 
   out <- out %>%
     dplyr::mutate(
       projection_center_mode = center_mode,
+      projection_center_source = center_source,
       projection_sphere_center_x = sphere_center[1],
       projection_sphere_center_y = sphere_center[2],
       projection_sphere_center_z = sphere_center[3],
       projection_sphere_radius_um = sphere_radius,
-      projection_sphere_size_um = cp_diam_um
+      projection_sphere_size_um = cp_diam_um,
+      projection_sphere_size_cm = cp_diam_cm
     )
 
   write_csv_safe(out, task$output_corneal_projections_abs)
@@ -287,6 +294,8 @@ main <- function() {
     facet_count = nrow(out),
     projected_facet_count = sum(valid_projection),
     projection_center_mode = center_mode,
+    projection_center_source = center_source,
+    projection_sphere_size_cm = cp_diam_cm,
     projection_sphere_size_um = cp_diam_um,
     projection_sphere_radius_um = sphere_radius,
     output_corneal_projections = task$output_corneal_projections

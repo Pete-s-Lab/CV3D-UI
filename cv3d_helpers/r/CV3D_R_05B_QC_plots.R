@@ -184,11 +184,11 @@ plot_pointcloud_png <- function(pointcloud, out_png, cv_id, eye, coord_suffix, s
   facets <- pcs$facets
   landmarks <- pcs$landmarks
   cols_xyz <- paste0(c("x", "y", "z"), coord_suffix)
-  need_cols(facets, c(cols_xyz, "size"), paste(stage_label, "facets"))
+  need_cols(facets, c(cols_xyz, "facet_size_smoothed"), paste(stage_label, "facets"))
   need_cols(landmarks, c("landmark", cols_xyz), paste(stage_label, "landmarks"))
 
   proj_cols <- choose_projection(pointcloud, coord_suffix)
-  vals <- suppressWarnings(as.numeric(facets$size))
+  vals <- suppressWarnings(as.numeric(facets$facet_size_smoothed))
   mapped <- map_colors(vals)
   cex <- point_cex_from_size(vals)
   lm_cex_val <- max(mean(cex[is.finite(cex)], na.rm = TRUE) * 1.6, 1.6)
@@ -235,6 +235,22 @@ compute_facet_radius <- function(size) {
   vals
 }
 
+resolve_facet_sphere_radius <- function(size, scale = 0, facet_size_estimate = NA_real_) {
+  legacy <- compute_facet_radius(size)
+  scale <- suppressWarnings(as.numeric(scale)[1])
+  if (!is.finite(scale) || scale < 0) scale <- 0
+  if (scale == 0) return(legacy)
+
+  vals <- suppressWarnings(as.numeric(size))
+  estimate <- suppressWarnings(as.numeric(facet_size_estimate)[1])
+  if (!is.finite(estimate) || estimate <= 0) estimate <- NA_real_
+  vals[!is.finite(vals) | vals <= 0] <- estimate
+  radius <- 0.5 * vals * scale
+  bad <- !is.finite(radius) | radius <= 0
+  radius[bad] <- legacy[bad]
+  radius
+}
+
 compute_landmark_radius <- function(size) {
   vals <- suppressWarnings(as.numeric(size))
   vals <- vals[is.finite(vals) & vals > 0]
@@ -274,13 +290,13 @@ set_cv3d_global_rgl_view <- function() {
   try(rgl::par3d(userMatrix = user_matrix, FOV = 35, zoom = 0.78), silent = TRUE)
 }
 
-open_alignment_rgl <- function(pointcloud, cv_id, eye) {
+open_alignment_rgl <- function(pointcloud, cv_id, eye, facet_sphere_scale = 0, facet_size_estimate = NA_real_) {
   pcs <- split_pointcloud(pointcloud, "_global", "05B global aligned point-cloud")
   facets <- pcs$facets
   landmarks <- pcs$landmarks
-  vals <- suppressWarnings(as.numeric(facets$size))
+  vals <- suppressWarnings(as.numeric(facets$facet_size_smoothed))
   cols <- map_colors(vals)$cols
-  facet_radius <- compute_facet_radius(vals)
+  facet_radius <- resolve_facet_sphere_radius(vals, facet_sphere_scale, facet_size_estimate)
   landmark_radius <- compute_landmark_radius(vals)
   z_offset <- landmark_radius * 2.0
 
@@ -313,6 +329,10 @@ main <- function() {
 
   entries <- get_input_eyes(task)
   eyes_used <- vapply(entries, function(x) as.character(x$eye %||% eye), character(1))
+  facet_sphere_scale <- suppressWarnings(as.numeric(task$facet_sphere_scale %||% task$parameters$facet_sphere_scale %||% 0)[1])
+  if (!is.finite(facet_sphere_scale) || facet_sphere_scale < 0) facet_sphere_scale <- 0
+  facet_size_estimate <- suppressWarnings(as.numeric(task$facet_size_estimate %||% task$parameters$facet_size_estimate %||% NA_real_)[1])
+  if (!is.finite(facet_size_estimate) || facet_size_estimate <= 0) facet_size_estimate <- NA_real_
 
   aligned <- read_combined_pointcloud(entries, "input_global_aligned_pointcloud_abs", eye)
   split_pointcloud(aligned, "_global", "05B global aligned point-cloud")
@@ -333,7 +353,7 @@ main <- function() {
   rgl_status <- "not_requested"
   if (isTRUE(task$open_rgl_window %||% FALSE)) {
     rgl_status <- tryCatch({
-      open_alignment_rgl(aligned, cv_id, paste(unique(eyes_used), collapse = "+"))
+      open_alignment_rgl(aligned, cv_id, paste(unique(eyes_used), collapse = "+"), facet_sphere_scale, facet_size_estimate)
       "opened_and_closed"
     }, error = function(e) {
       paste0("failed: ", conditionMessage(e))
@@ -355,7 +375,9 @@ main <- function() {
       output_reference_plot_png_abs = ref_out_png,
       reference_plot_created = reference_plot_created,
       open_rgl_window = isTRUE(task$open_rgl_window %||% FALSE),
-      rgl_status = rgl_status
+      rgl_status = rgl_status,
+      facet_sphere_scale = facet_sphere_scale,
+      facet_size_estimate = facet_size_estimate
     )
   ))
 }

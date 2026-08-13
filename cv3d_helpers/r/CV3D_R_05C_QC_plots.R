@@ -72,10 +72,10 @@ read_combined_projection_df <- function(entries, default_eye) {
     global <- read_csv_safe(normalizePath(global_path, winslash = "/", mustWork = TRUE))
     projection <- read_csv_safe(normalizePath(projection_path, winslash = "/", mustWork = TRUE))
     need_cols(global, c("facet_id", "x_global", "y_global", "z_global", "norm.x_global", "norm.y_global", "norm.z_global"), "05B global-coordinate table")
-    need_cols(projection, c("facet_id", "corn.proj.x", "corn.proj.y", "corn.proj.z", "latitude", "longitude"), "05C projection table")
+    need_cols(projection, c("facet_id", "corn.proj.x", "corn.proj.y", "corn.proj.z", "elevation", "azimuth"), "05C projection table")
     df_i <- dplyr::left_join(
       projection,
-      global %>% dplyr::select(dplyr::any_of(c("facet_id", "x_global", "y_global", "z_global", "norm.x_global", "norm.y_global", "norm.z_global", "size"))),
+      global %>% dplyr::select(dplyr::any_of(c("facet_id", "x_global", "y_global", "z_global", "norm.x_global", "norm.y_global", "norm.z_global", "facet_size_smoothed"))),
       by = "facet_id",
       suffix = c("", ".global_input")
     )
@@ -168,18 +168,37 @@ point_cex_from_size <- function(size, base = 0.65) {
 }
 
 facet_size_values <- function(df, n = nrow(df)) {
-  if ("size" %in% names(df)) {
-    vals <- suppressWarnings(as.numeric(df$size))
+  if ("facet_size_smoothed" %in% names(df)) {
+    vals <- suppressWarnings(as.numeric(df$facet_size_smoothed))
     if (length(vals) == n && any(is.finite(vals))) return(vals)
   }
   seq_len(n)
+}
+
+resolve_facet_sphere_radius <- function(df, scale = 0, facet_size_estimate = NA_real_) {
+  scale <- suppressWarnings(as.numeric(scale)[1])
+  if (!is.finite(scale) || scale <= 0) return(rep(NA_real_, nrow(df)))
+  size <- rep(NA_real_, nrow(df))
+  if ("facet_size_smoothed" %in% names(df)) {
+    size <- suppressWarnings(as.numeric(df$facet_size_smoothed))
+  }
+  estimate <- suppressWarnings(as.numeric(facet_size_estimate)[1])
+  if (!is.finite(estimate) || estimate <= 0) estimate <- NA_real_
+  if (!is.finite(estimate)) {
+    valid <- size[is.finite(size) & size > 0]
+    if (length(valid) > 0) estimate <- stats::median(valid)
+  }
+  size[!is.finite(size) | size <= 0] <- estimate
+  radius <- 0.5 * size * scale
+  radius[!is.finite(radius) | radius <= 0] <- NA_real_
+  radius
 }
 
 facet_color_map <- function(df) {
   vals <- facet_size_values(df)
   mapped <- map_colors(vals)
   mapped$values <- vals
-  mapped$label <- if ("size" %in% names(df) && any(is.finite(suppressWarnings(as.numeric(df$size))))) "Facet size" else "Facet index"
+  mapped$label <- if ("facet_size_smoothed" %in% names(df) && any(is.finite(suppressWarnings(as.numeric(df$facet_size_smoothed))))) "Facet size" else "Facet index"
   mapped
 }
 
@@ -187,12 +206,12 @@ make_projection_png <- function(df, view_name, path, cv_id, eye) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
 
   view_defs <- list(
-    front = list(px = "corn.proj.x", py = "corn.proj.z", fx = "x_global", fy = "z_global", sx = 1,  sy = 1,  xlab = "x (um)",  ylab = "z (um)"),
-    back  = list(px = "corn.proj.x", py = "corn.proj.z", fx = "x_global", fy = "z_global", sx = -1, sy = 1,  xlab = "-x (um)", ylab = "z (um)"),
-    left  = list(px = "corn.proj.y", py = "corn.proj.z", fx = "y_global", fy = "z_global", sx = 1,  sy = 1,  xlab = "y (um)",  ylab = "z (um)"),
-    right = list(px = "corn.proj.y", py = "corn.proj.z", fx = "y_global", fy = "z_global", sx = -1, sy = 1,  xlab = "-y (um)", ylab = "z (um)"),
-    top   = list(px = "corn.proj.x", py = "corn.proj.y", fx = "x_global", fy = "y_global", sx = 1,  sy = 1,  xlab = "x (um)",  ylab = "y (um)"),
-    bottom = list(px = "corn.proj.x", py = "corn.proj.y", fx = "x_global", fy = "y_global", sx = 1, sy = -1, xlab = "x (um)",  ylab = "-y (um)")
+    front = list(px = "corn.proj.x", py = "corn.proj.z", fx = "x_global", fy = "z_global", sx = 1,  sy = 1,  xlab = "x (µm)",  ylab = "z (µm)"),
+    back  = list(px = "corn.proj.x", py = "corn.proj.z", fx = "x_global", fy = "z_global", sx = -1, sy = 1,  xlab = "-x (µm)", ylab = "z (µm)"),
+    left  = list(px = "corn.proj.y", py = "corn.proj.z", fx = "y_global", fy = "z_global", sx = 1,  sy = 1,  xlab = "y (µm)",  ylab = "z (µm)"),
+    right = list(px = "corn.proj.y", py = "corn.proj.z", fx = "y_global", fy = "z_global", sx = -1, sy = 1,  xlab = "-y (µm)", ylab = "z (µm)"),
+    top   = list(px = "corn.proj.x", py = "corn.proj.y", fx = "x_global", fy = "y_global", sx = 1,  sy = 1,  xlab = "x (µm)",  ylab = "y (µm)"),
+    bottom = list(px = "corn.proj.x", py = "corn.proj.y", fx = "x_global", fy = "y_global", sx = 1, sy = -1, xlab = "x (µm)",  ylab = "-y (µm)")
   )
   vd <- view_defs[[view_name]] %||% view_defs$top
 
@@ -203,7 +222,7 @@ make_projection_png <- function(df, view_name, path, cv_id, eye) {
   cmap <- facet_color_map(df)
   colour_value <- cmap$values
   mapped <- cmap
-  cex <- if ("size" %in% names(df)) point_cex_from_size(df$size) else rep(0.65, length(px))
+  cex <- if ("facet_size_smoothed" %in% names(df)) point_cex_from_size(df$facet_size_smoothed) else rep(0.65, length(px))
   facet_shape <- ifelse(as.character(df$source_eye) == "eye2", 17, 16)
 
   all_x <- c(px, fx)
@@ -229,14 +248,14 @@ make_projection_png <- function(df, view_name, path, cv_id, eye) {
   invisible(path)
 }
 
-make_latlon_png <- function(df, path, cv_id, eye) {
+make_view_angles_png <- function(df, path, cv_id, eye) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
-  x <- suppressWarnings(as.numeric(df$longitude))
-  y <- suppressWarnings(as.numeric(df$latitude))
+  x <- suppressWarnings(as.numeric(df$azimuth))
+  y <- suppressWarnings(as.numeric(df$elevation))
   cmap <- facet_color_map(df)
   colour_value <- cmap$values
   mapped <- cmap
-  cex <- if ("size" %in% names(df)) point_cex_from_size(df$size) else rep(0.65, length(x))
+  cex <- if ("facet_size_smoothed" %in% names(df)) point_cex_from_size(df$facet_size_smoothed) else rep(0.65, length(x))
 
   png(path, width = 1800, height = 1200, res = 220)
   op <- par(mar = c(4, 4, 4, 6))
@@ -246,9 +265,9 @@ make_latlon_png <- function(df, path, cv_id, eye) {
     pch = ifelse(as.character(df$source_eye) == "eye2", 17, 16),
     cex = cex,
     col = mapped$cols,
-    xlab = "longitude (deg)",
-    ylab = "latitude (deg)",
-    main = sprintf("%s %s - 05C corneal projection latitude/longitude", cv_id, eye),
+    xlab = "azimuth (deg)",
+    ylab = "elevation (deg)",
+    main = sprintf("%s %s - 05C corneal projection elevation/azimuth", cv_id, eye),
     xlim = plot_range(x),
     ylim = plot_range(y)
   )
@@ -269,8 +288,8 @@ normalize_vectors <- function(x, y, z) {
 
 rgl_add_sphere_wireframe <- function(center, radius, n_lat = 9, n_lon = 18, col = "skyblue") {
   theta <- seq(0, 2 * pi, length.out = 181)
-  latitudes <- seq(-pi / 2, pi / 2, length.out = n_lat)
-  for (lat in latitudes) {
+  elevations <- seq(-pi / 2, pi / 2, length.out = n_lat)
+  for (lat in elevations) {
     rr <- radius * cos(lat)
     z <- center[3] + radius * sin(lat)
     x <- center[1] + rr * cos(theta)
@@ -341,7 +360,7 @@ snapshot_rgl <- function(path) {
   invisible(path)
 }
 
-render_rgl_scene <- function(df, path, cv_id, eye, keep_open = FALSE, make_snapshot = FALSE) {
+render_rgl_scene <- function(df, path, cv_id, eye, keep_open = FALSE, make_snapshot = FALSE, facet_sphere_scale = 0, facet_size_estimate = NA_real_) {
   need_cols(df, c("x_global", "y_global", "z_global", "norm.x_global", "norm.y_global", "norm.z_global", "corn.proj.x", "corn.proj.y", "corn.proj.z", "projection_sphere_center_x", "projection_sphere_center_y", "projection_sphere_center_z", "projection_sphere_radius_um"), "05C projection table")
 
   facets <- cbind(df$x_global, df$y_global, df$z_global)
@@ -382,7 +401,21 @@ render_rgl_scene <- function(df, path, cv_id, eye, keep_open = FALSE, make_snaps
   }
 
   good_facets <- stats::complete.cases(facets)
-  rgl::points3d(facets[good_facets, 1], facets[good_facets, 2], facets[good_facets, 3], size = 4, col = projection_cols[good_facets])
+  facet_radius <- resolve_facet_sphere_radius(df, facet_sphere_scale, facet_size_estimate)
+  if (is.finite(facet_sphere_scale) && facet_sphere_scale > 0) {
+    sphere_facets <- good_facets & is.finite(facet_radius) & facet_radius > 0
+    if (any(sphere_facets)) {
+      rgl::spheres3d(facets[sphere_facets, 1], facets[sphere_facets, 2], facets[sphere_facets, 3],
+                     radius = facet_radius[sphere_facets], col = projection_cols[sphere_facets])
+    }
+    unresolved_facets <- good_facets & !sphere_facets
+    if (any(unresolved_facets)) {
+      rgl::points3d(facets[unresolved_facets, 1], facets[unresolved_facets, 2], facets[unresolved_facets, 3],
+                    size = 4, col = projection_cols[unresolved_facets])
+    }
+  } else {
+    rgl::points3d(facets[good_facets, 1], facets[good_facets, 2], facets[good_facets, 3], size = 4, col = projection_cols[good_facets])
+  }
 
   good_proj <- stats::complete.cases(projections)
   rgl::points3d(projections[good_proj, 1], projections[good_proj, 2], projections[good_proj, 3], size = 6, col = projection_cols[good_proj])
@@ -426,6 +459,10 @@ main <- function() {
   eye <- task$eye %||% "eye?"
   entries <- get_input_eyes(task)
   df <- read_combined_projection_df(entries, eye)
+  facet_sphere_scale <- suppressWarnings(as.numeric(task$facet_sphere_scale %||% task$parameters$facet_sphere_scale %||% 0)[1])
+  if (!is.finite(facet_sphere_scale) || facet_sphere_scale < 0) facet_sphere_scale <- 0
+  facet_size_estimate <- suppressWarnings(as.numeric(task$facet_size_estimate %||% task$parameters$facet_size_estimate %||% NA_real_)[1])
+  if (!is.finite(facet_size_estimate) || facet_size_estimate <= 0) facet_size_estimate <- NA_real_
 
   output_pngs <- task$output_plot_pngs_abs
   if (is.null(output_pngs) || length(output_pngs) == 0) stop("Task JSON is missing output_plot_pngs_abs.", call. = FALSE)
@@ -440,10 +477,10 @@ main <- function() {
     }
   }
 
-  latlon_path <- output_pngs[["latlon"]] %||% ""
-  if (nzchar(latlon_path)) {
-    make_latlon_png(df, latlon_path, cv_id, plot_eye_label)
-    created[["latlon"]] <- latlon_path
+  view_angles_path <- output_pngs[["view_angles"]] %||% ""
+  if (nzchar(view_angles_path)) {
+    make_view_angles_png(df, view_angles_path, cv_id, plot_eye_label)
+    created[["view_angles"]] <- view_angles_path
   }
 
   rgl_path <- output_pngs[["rgl_3d"]] %||% task$output_plot_png_abs %||% ""
@@ -452,7 +489,7 @@ main <- function() {
   rgl_status <- "not_requested"
   if (open_rgl || make_rgl_snapshot) {
     rgl_status <- tryCatch({
-      snapshot_status <- render_rgl_scene(df, rgl_path, cv_id, plot_eye_label, keep_open = open_rgl, make_snapshot = make_rgl_snapshot)
+      snapshot_status <- render_rgl_scene(df, rgl_path, cv_id, plot_eye_label, keep_open = open_rgl, make_snapshot = make_rgl_snapshot, facet_sphere_scale = facet_sphere_scale, facet_size_estimate = facet_size_estimate)
       if (nzchar(rgl_path) && file.exists(rgl_path)) created[["rgl_3d"]] <- rgl_path
       if (open_rgl) {
         paste0("opened_and_closed; snapshot_", snapshot_status)
@@ -475,7 +512,9 @@ main <- function() {
     make_rgl_snapshot = make_rgl_snapshot,
     rgl_status = rgl_status,
     rgl_warning = rgl_warning,
-    colour_metric = if ("size" %in% names(df)) "facet size" else "facet index",
+    facet_sphere_scale = facet_sphere_scale,
+    facet_size_estimate = facet_size_estimate,
+    colour_metric = if ("facet_size_smoothed" %in% names(df)) "facet size" else "facet index",
     normal_length = "0.5 * distance from facet point to corneal-projection point"
   )))
 }

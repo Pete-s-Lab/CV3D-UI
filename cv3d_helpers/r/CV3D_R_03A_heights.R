@@ -49,7 +49,7 @@ write_json <- function(x, path) {
 status_payload <- function(task, status, message, extra = list()) {
   base <- list(
     status_version = "0.1",
-    script_version = "CV3D_R_step03A_local_heights_0.3.2_search_diam_prompt",
+    script_version = "CV3D_R_step03A_local_heights_0.3.4_spherical_neighbourhood",
     status = status,
     message = message,
     cv_id = task$cv_id,
@@ -96,10 +96,20 @@ tryCatch({
     stop("Invalid facet_size_estimate in task JSON: ", task$facet_size_estimate, call. = FALSE)
   }
 
-  search_diam <- suppressWarnings(as.numeric(task$local_height_search_diam))
-  if (!is.finite(search_diam) || search_diam <= 0) {
-    search_diam <- facet_size * 3
-    message("No valid local_height_search_diam in task JSON; falling back to facet_size_estimate * 3 = ", search_diam)
+  neighbourhood_radius <- suppressWarnings(as.numeric(task$local_height_neighbourhood_radius))
+  if (!is.finite(neighbourhood_radius) || neighbourhood_radius <= 0) {
+    legacy_half_width <- suppressWarnings(as.numeric(task$local_height_neighbourhood_half_width))
+    legacy_search_diam <- suppressWarnings(as.numeric(task$local_height_search_diam))
+    if (is.finite(legacy_half_width) && legacy_half_width > 0) {
+      neighbourhood_radius <- legacy_half_width
+      message("Using legacy local_height_neighbourhood_half_width as spherical neighbourhood radius: ", neighbourhood_radius)
+    } else if (is.finite(legacy_search_diam) && legacy_search_diam > 0) {
+      neighbourhood_radius <- legacy_search_diam / 8
+      message("Using legacy local_height_search_diam / 8 as spherical neighbourhood radius: ", neighbourhood_radius)
+    } else {
+      neighbourhood_radius <- facet_size * 0.5
+      message("No valid neighbourhood radius in task JSON; falling back to facet_size_estimate * 0.5 = ", neighbourhood_radius)
+    }
   }
 
   max_cores <- as.integer(task$max_cores)
@@ -135,12 +145,12 @@ tryCatch({
   readr::write_csv(triangles, out_triangles, progress = FALSE)
 
   # 2) Raw local heights only --------------------------------------------------
-  message("Calculating RAW local heights only with facet_size_estimate = ", facet_size, ", search_diam = ", search_diam, " and cores = ", max_cores)
+  message("Calculating RAW local heights only with facet_size_estimate = ", facet_size, ", neighbourhood_radius = ", neighbourhood_radius, " and cores = ", max_cores)
   message("Normalization is intentionally NOT run in Step 03A.")
 
   heights <- calculate_local_heights(
     df = triangles,
-    search_diam = search_diam,
+    neighbourhood_radius = neighbourhood_radius,
     cores = max_cores,
     plot_file = NULL,
     verbose = TRUE,
@@ -163,8 +173,8 @@ tryCatch({
     c(
       "local_height_norm",
       "local_height_norm_col",
-      "local_height_log_norm",
-      "local_height_log_norm_col",
+      "local_height_norm_contrast",
+      "local_height_norm_contrast_col",
       "normalized_local_height",
       "normalized_local_height_col"
     )
@@ -186,9 +196,9 @@ tryCatch({
   par(mfrow = c(1, 3))
 
   raw_col <- if ("local_height_col" %in% names(heights)) heights$local_height_col else "black"
-  filtered_col <- if ("local_height_filterd_col" %in% names(heights)) heights$local_height_filterd_col else raw_col
-  log_values <- if ("local_height_log" %in% names(heights)) heights$local_height_log else log10(abs(heights$local_height) + .Machine$double.eps)
-  log_col <- if ("local_height_log_col" %in% names(heights)) heights$local_height_log_col else filtered_col
+  filtered_col <- if ("local_height_filtered_col" %in% names(heights)) heights$local_height_filtered_col else raw_col
+  contrast_values <- if ("local_height_contrast" %in% names(heights)) heights$local_height_contrast else rep(NA_real_, nrow(heights))
+  contrast_col <- if ("local_height_contrast_col" %in% names(heights)) heights$local_height_contrast_col else filtered_col
 
   plot(
     heights$local_height,
@@ -209,13 +219,13 @@ tryCatch({
     ylab = "local_height"
   )
   plot(
-    log_values,
-    col = log_col,
+    contrast_values,
+    col = contrast_col,
     pch = 16,
     cex = 0.25,
-    main = "log display only",
+    main = "peak-enhanced contrast",
     xlab = "triangle index",
-    ylab = "log display value"
+    ylab = "contrast (0-1)"
   )
   dev.off()
 
@@ -234,7 +244,7 @@ tryCatch({
         triangle_count = nrow(triangles),
         local_height_count = nrow(heights),
         facet_size_estimate = facet_size,
-        local_height_search_diam = search_diam,
+        local_height_neighbourhood_radius = neighbourhood_radius,
         max_cores_used = max_cores,
         scaled_stl_coordinates_by_1000 = FALSE,
         normalization_performed = FALSE,

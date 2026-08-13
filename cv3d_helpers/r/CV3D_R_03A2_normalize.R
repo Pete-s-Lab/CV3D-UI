@@ -48,7 +48,7 @@ write_json <- function(x, path) {
 status_payload <- function(task, status, message, extra = list()) {
   base <- list(
     status_version = "0.1",
-    script_version = "CV3D_R_step03A2_normalize_local_heights_0.1.0",
+    script_version = "CV3D_R_step03A2_normalize_local_heights_0.1.1",
     status = status,
     message = message,
     cv_id = task$cv_id,
@@ -57,11 +57,19 @@ status_payload <- function(task, status, message, extra = list()) {
     input_local_heights_abs = task$input_local_heights_abs,
     output_local_heights_normalized_abs = task$output_local_heights_normalized_abs,
     output_normalization_plot_abs = task$output_normalization_plot_abs,
-    normalize_diam = task$normalize_diam,
+    neighbourhood_radius = task$neighbourhood_radius,
     column_to_normalize = task$column_to_normalize,
     max_cores = task$max_cores
   )
   utils::modifyList(base, extra)
+}
+
+scalar_numeric_or <- function(x, default = NA_real_) {
+  value <- suppressWarnings(as.numeric(x))
+  if (length(value) < 1 || !is.finite(value[[1]])) {
+    return(default)
+  }
+  value[[1]]
 }
 
 task <- load_json(task_json)
@@ -87,16 +95,32 @@ tryCatch({
   dir.create(dirname(out_plot), recursive = TRUE, showWarnings = FALSE)
   dir.create(dirname(status_file), recursive = TRUE, showWarnings = FALSE)
 
-  normalize_diam <- as.numeric(task$normalize_diam)
-  if (!is.finite(normalize_diam) || normalize_diam <= 0) {
-    stop("Invalid normalize_diam in task JSON: ", task$normalize_diam, call. = FALSE)
+  neighbourhood_radius <- scalar_numeric_or(task$neighbourhood_radius)
+  if (!is.finite(neighbourhood_radius) || neighbourhood_radius <= 0) {
+    legacy_half_width <- scalar_numeric_or(task$neighbourhood_half_width)
+    legacy_normalize_diam <- scalar_numeric_or(task$normalize_diam)
+    if (is.finite(legacy_half_width) && legacy_half_width > 0) {
+      neighbourhood_radius <- legacy_half_width
+      message("Using legacy neighbourhood_half_width as spherical neighbourhood radius: ", neighbourhood_radius)
+    } else if (is.finite(legacy_normalize_diam) && legacy_normalize_diam > 0) {
+      neighbourhood_radius <- legacy_normalize_diam
+      message("Using legacy normalize_diam as spherical neighbourhood radius: ", neighbourhood_radius)
+    } else {
+      stop("Invalid neighbourhood_radius in task JSON.", call. = FALSE)
+    }
   }
 
-  max_cores <- as.integer(task$max_cores)
+  max_cores <- as.integer(scalar_numeric_or(task$max_cores, 1))
   if (!is.finite(max_cores) || max_cores < 1) max_cores <- 1
 
+  lower_quantile <- scalar_numeric_or(task$lower_quantile, 0.10)
+  upper_quantile <- scalar_numeric_or(task$upper_quantile, 0.90)
+  if (lower_quantile < 0 || upper_quantile > 1 || lower_quantile >= upper_quantile) {
+    stop("Normalization quantiles must satisfy 0 <= lower_quantile < upper_quantile <= 1.", call. = FALSE)
+  }
+
   column_to_normalize <- task$column_to_normalize
-  if (is.null(column_to_normalize) || is.na(column_to_normalize) || column_to_normalize == "") {
+  if (is.null(column_to_normalize) || length(column_to_normalize) != 1 || is.na(column_to_normalize) || column_to_normalize == "") {
     column_to_normalize <- "local_height"
   }
 
@@ -123,11 +147,13 @@ tryCatch({
     stop("Input column '", column_to_normalize, "' contains no finite values.", call. = FALSE)
   }
 
-  message("Normalizing local heights with normalize_diam = ", normalize_diam, ", cores = ", max_cores)
+  message("Normalizing local heights with neighbourhood_radius = ", neighbourhood_radius, ", quantiles = ", lower_quantile, "-", upper_quantile, ", cores = ", max_cores)
   normalized <- normalize_local_heights(
     df = local_heights,
-    normalize_diam = normalize_diam,
+    neighbourhood_radius = neighbourhood_radius,
     column_to_normalize = column_to_normalize,
+    lower_quantile = lower_quantile,
+    upper_quantile = upper_quantile,
     cores = max_cores,
     plot_file = NULL,
     plot_results = FALSE,
@@ -155,8 +181,12 @@ tryCatch({
   par(mfrow = c(1, 3))
   raw_col <- if ("local_height_col" %in% names(normalized)) normalized$local_height_col else "black"
   norm_col <- if ("local_height_norm_col" %in% names(normalized)) normalized$local_height_norm_col else "black"
-  log_norm_values <- if ("local_height_log_norm" %in% names(normalized)) normalized$local_height_log_norm else log10(abs(normalized$local_height_norm) + .Machine$double.eps)
-  log_norm_col <- if ("local_height_log_norm_col" %in% names(normalized)) normalized$local_height_log_norm_col else norm_col
+  norm_contrast_values <- if ("local_height_norm_contrast" %in% names(normalized)) {
+    normalized$local_height_norm_contrast
+  } else {
+    pmin(pmax((10^as.numeric(normalized$local_height_norm) - 1) / 9, 0), 1)
+  }
+  norm_contrast_col <- if ("local_height_norm_contrast_col" %in% names(normalized)) normalized$local_height_norm_contrast_col else norm_col
 
   plot(
     normalized[[column_to_normalize]],
@@ -177,13 +207,13 @@ tryCatch({
     ylab = "local_height_norm"
   )
   plot(
-    log_norm_values,
-    col = log_norm_col,
+    norm_contrast_values,
+    col = norm_contrast_col,
     pch = 16,
     cex = 0.25,
-    main = "log-normalized display",
+    main = "normalized peak-enhanced contrast",
     xlab = "triangle index",
-    ylab = "local_height_log_norm"
+    ylab = "local_height_norm_contrast"
   )
   dev.off()
 
@@ -199,7 +229,7 @@ tryCatch({
     list(
       summary = list(
         row_count = nrow(normalized),
-        normalize_diam = normalize_diam,
+        neighbourhood_radius = neighbourhood_radius,
         column_to_normalize = column_to_normalize,
         max_cores_used = max_cores,
         finite_input_count = sum(finite_input),

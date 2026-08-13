@@ -8,6 +8,7 @@ suppressPackageStartupMessages({
   library(readr)
   library(dplyr)
   library(rgl)
+  library(CV3D)
 })
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -54,7 +55,7 @@ dir.create(dirname(status_file), recursive = TRUE, showWarnings = FALSE)
 message("Reading normalized local-height CSV: ", input_csv)
 local_heights <- suppressMessages(readr::read_csv(input_csv, show_col_types = FALSE))
 
-required_cols <- c("x", "y", "z", "local_height_col", "local_height_log_col", "local_height_log_norm_col")
+required_cols <- c("x", "y", "z", "local_height_col", "local_height_contrast_col", "local_height_norm_contrast_col")
 missing_cols <- setdiff(required_cols, names(local_heights))
 if (length(missing_cols) > 0) {
   stop(
@@ -68,37 +69,64 @@ if (nrow(local_heights) == 0) {
   stop("The normalized local-height CSV is empty.", call. = FALSE)
 }
 
-message("Opening rgl device...")
-rgl::open3d(useNULL = FALSE)
-
-  set_cv3d_rgl_window_size(scale = 3)
-on.exit(try(rgl::par3d(skipRedraw = FALSE), silent = TRUE), add = TRUE)
-
-mean_x <- mean(local_heights$x, na.rm = TRUE)
+normal_cols <- c("norm.x", "norm.y", "norm.z")
+have_normals <- all(normal_cols %in% names(local_heights))
 
 message("Rendering 3D local-height views...")
-rgl::plot3d(
-  local_heights %>%
-    dplyr::select(x, y, z) %>%
-    dplyr::mutate(x = x - (mean_x * 2)),
-  aspect = "iso",
-  col = local_heights$local_height_col,
-  size = 5
-)
-rgl::points3d(
-  local_heights %>% dplyr::select(x, y, z),
-  aspect = "iso",
-  col = local_heights$local_height_log_col,
-  size = 5
-)
-rgl::points3d(
-  local_heights %>%
-    dplyr::select(x, y, z) %>%
-    dplyr::mutate(x = x + (mean_x * 2)),
-  aspect = "iso",
-  col = local_heights$local_height_log_norm_col,
-  size = 5
-)
+
+if (have_normals) {
+  # Use one standardised face-on orientation for all full-eye comparison
+  # clouds. CV3D centres each cloud independently and positions subsequent
+  # clouds in units of the first eye's displayed width.
+  view <- CV3D::view_eye_face_on(
+    local_heights,
+    projection = "3D",
+    col = local_heights$local_height_col,
+    rgl_size = 3,
+    axes = TRUE
+  )
+  set_cv3d_rgl_window_size(scale = 3)
+  on.exit(try(rgl::par3d(skipRedraw = FALSE), silent = TRUE), add = TRUE)
+
+  CV3D::view_eye_face_on(
+    local_heights,
+    projection = "3D",
+    view = view,
+    add = TRUE,
+    translate_x = 1.1,
+    col = local_heights$local_height_contrast_col,
+    rgl_size = 3
+  )
+  CV3D::view_eye_face_on(
+    local_heights,
+    projection = "3D",
+    view = view,
+    add = TRUE,
+    translate_x = 2.2,
+    col = local_heights$local_height_norm_contrast_col,
+    rgl_size = 3
+  )
+  rgl::title3d(main = "Raw local height | Peak-enhanced contrast | Normalized contrast")
+} else {
+  message("Surface normals unavailable; using the legacy unconstrained rgl view.")
+  rgl::open3d(useNULL = FALSE)
+  set_cv3d_rgl_window_size(scale = 3)
+  on.exit(try(rgl::par3d(skipRedraw = FALSE), silent = TRUE), add = TRUE)
+  xrange <- diff(range(local_heights$x, na.rm = TRUE))
+  if (!is.finite(xrange) || xrange <= 0) xrange <- 1
+  rgl::plot3d(
+    local_heights$x - xrange * 1.25, local_heights$y, local_heights$z,
+    aspect = "iso", col = local_heights$local_height_col, size = 3
+  )
+  rgl::points3d(
+    local_heights$x, local_heights$y, local_heights$z,
+    col = local_heights$local_height_contrast_col, size = 3
+  )
+  rgl::points3d(
+    local_heights$x + xrange * 1.25, local_heights$y, local_heights$z,
+    col = local_heights$local_height_norm_contrast_col, size = 3
+  )
+}
 
 # Give the device a moment to render before snapshotting.
 Sys.sleep(0.5)

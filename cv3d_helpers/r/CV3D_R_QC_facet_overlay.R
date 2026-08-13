@@ -128,24 +128,53 @@ open_rgl_overlay <- function(local_heights, overlay_points, bg_cols, overlay_col
     stop("Package rgl is required for the interactive 3D window.", call. = FALSE)
   }
 
-  rgl::open3d(useNULL = FALSE)
-  set_cv3d_rgl_window_size(scale = 3)
+  if (!requireNamespace("CV3D", quietly = TRUE)) {
+    stop("Package CV3D is required for the standardised face-on QC view.", call. = FALSE)
+  }
 
-  rgl::plot3d(
-    local_heights[, c("x", "y", "z")],
-    aspect = "iso",
-    col = bg_cols,
-    size = 4,
-    xlab = "x",
-    ylab = "y",
-    zlab = "z"
-  )
+  normal_cols <- c("norm.x", "norm.y", "norm.z")
+  have_normals <- all(normal_cols %in% names(local_heights))
+  view <- NULL
+  if (have_normals) {
+    view <- CV3D::view_eye_face_on(
+      local_heights,
+      projection = "3D",
+      col = bg_cols,
+      rgl_size = 3,
+      axes = TRUE
+    )
+    set_cv3d_rgl_window_size(scale = 3)
+  } else {
+    message("Surface normals unavailable; using the legacy unconstrained rgl view.")
+    rgl::open3d(useNULL = FALSE)
+    set_cv3d_rgl_window_size(scale = 3)
+    rgl::plot3d(
+      local_heights[, c("x", "y", "z")],
+      aspect = "iso",
+      col = bg_cols,
+      size = 3,
+      xlab = "x",
+      ylab = "y",
+      zlab = "z"
+    )
+  }
 
   if (nrow(overlay_points) > 0) {
+    if (have_normals) {
+      overlay_plot <- sweep(
+        as.matrix(overlay_points[, c("x", "y", "z")]),
+        2,
+        view$cloud_centre,
+        "-"
+      )
+    } else {
+      overlay_plot <- as.matrix(overlay_points[, c("x", "y", "z")])
+    }
+
     rgl::spheres3d(
-      x = overlay_points$x,
-      y = overlay_points$y,
-      z = overlay_points$z,
+      x = overlay_plot[, 1],
+      y = overlay_plot[, 2],
+      z = overlay_plot[, 3],
       radius = sphere_radius,
       color = overlay_color,
       alpha = 1

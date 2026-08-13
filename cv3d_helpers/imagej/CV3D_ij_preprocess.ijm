@@ -20,7 +20,7 @@
  * Peter T. Rühr original workflow, adapted for CV3D integration.
  */
 
-script_version = "0.9.9039-cv3d-preprocessing-nrrd-open-fix2";
+script_version = "0.9.9042-cv3d-preprocessing-nrrd-write-fix-autoquit";
 
 run("Collect Garbage");
 requires("1.39l");
@@ -62,6 +62,42 @@ function ensureDir(path) {
     if (!File.exists(path)) {
         File.makeDirectory(path);
     }
+}
+
+function roundSuggested2(value) {
+    return round(value * 100) / 100;
+}
+
+function suggestedDecimals(value) {
+    rounded_value = roundSuggested2(value);
+    if (abs(rounded_value - round(rounded_value)) < 0.000000001) {
+        return 0;
+    }
+    return 2;
+}
+
+
+function closeImageJAfterCv3d() {
+    if (isOpen("3D Viewer")) {
+        selectWindow("3D Viewer");
+        run("Close");
+    }
+    if (isOpen("Results")) {
+        selectWindow("Results");
+        run("Close");
+    }
+    if (isOpen("Log")) {
+        selectWindow("Log");
+        run("Close");
+    }
+    while (nImages > 0) {
+        selectImage(nImages);
+        setOption("Changes", false);
+        close();
+    }
+    run("Collect Garbage");
+    wait(250);
+    run("Quit");
 }
 
 function waitForRectangleROI(dialog_title, instructions) {
@@ -206,6 +242,22 @@ function requireFile(abs_path, label) {
     if (!File.exists(abs_path)) {
         abortWithStatus("Missing expected " + label + ": " + abs_path);
     }
+}
+
+function saveNrrd(abs_path) {
+    // Fiji's NRRD reader and writer are separate plugins. Calling
+    // run("Nrrd ...") can invoke the reader and open a file chooser.
+    // Use ImageJ's built-in script evaluator to call Fiji's Nrrd_Writer
+    // directly, avoiding both that command-name conflict and BeanShell.
+    js_path = replace(abs_path, "\\", "\\\\");
+    js_path = replace(js_path, "'", "\\'");
+
+    script = "var imp = Packages.ij.WindowManager.getCurrentImage();" +
+             "if (imp == null) throw 'No active ImageJ image';" +
+             "var writer = new Packages.sc.fiji.io.Nrrd_Writer();" +
+             "writer.save(imp, '" + js_path + "');";
+
+    eval("script", script);
 }
 
 
@@ -653,7 +705,7 @@ facet_measurement_source = "manual_entry_after_failed_or_missing_line_selection"
 if (selectionType() == 5) {
     getLine(x1, y1, x2, y2, line_width);
     facet_line_pixels = sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2));
-    facet_size_estimate = round(facet_line_pixels * px_size * 1000) / 1000;
+    facet_size_estimate = roundSuggested2(facet_line_pixels * px_size);
     facet_measurement_source = "ImageJ_straight_line_selection";
 } else {
     waitForUser(
@@ -666,7 +718,8 @@ if (selectionType() == 5) {
 Dialog.create("Facet size estimate");
 Dialog.addMessage("Facet-size estimate for CV3D downstream defaults.");
 Dialog.addMessage("___________________________________");
-Dialog.addNumber("Facet size estimate:", facet_size_estimate, 3, 15, unit);
+facet_size_estimate = roundSuggested2(facet_size_estimate);
+Dialog.addNumber("Facet size estimate:", facet_size_estimate, suggestedDecimals(facet_size_estimate), 15, unit);
 Dialog.show();
 
 facet_size_estimate = Dialog.getNumber();
@@ -713,14 +766,14 @@ if (perc_d < 100) {
     selectWindow(scaled_head_title);
     nrrd_file = head_nrrd_path;
     print("Saving " + nrrd_file + "...");
-    run("Nrrd ...", "nrrd=[" + nrrd_file + "]");
+    saveNrrd(nrrd_file);
     getPixelSize(unit_head, px_size_head, ph_head, pd_head);
 } else {
     print("No scaling of head stack necessary.");
     perc_d = 100;
     nrrd_file = head_nrrd_path;
     print("Saving " + nrrd_file + "...");
-    run("Nrrd ...", "nrrd=[" + nrrd_file + "]");
+    saveNrrd(nrrd_file);
     px_size_head = px_size;
     unit_head = unit;
 }
@@ -742,7 +795,7 @@ if (has_eye1 == 1) {
     title_eye1 = getTitle();
 
     print(title_eye1 + " -> eye1");
-    run("Nrrd ...", "nrrd=[" + eye1_nrrd_path + "]");
+    saveNrrd(eye1_nrrd_path);
     requireFile(eye1_nrrd_path, "eye1 NRRD");
 }
 
@@ -756,7 +809,7 @@ if (has_eye2 == 1) {
     title_eye2 = getTitle();
 
     print(title_eye2 + " -> eye2");
-    run("Nrrd ...", "nrrd=[" + eye2_nrrd_path + "]");
+    saveNrrd(eye2_nrrd_path);
     requireFile(eye2_nrrd_path, "eye2 NRRD");
 }
 
@@ -831,13 +884,8 @@ final_message = "ImageJ preprocessing finished successfully. Mesh/STL extraction
 
 writeCv3dStatus(final_status, final_message);
 
-while (nImages > 0) {
-    selectImage(nImages);
-    close();
-}
-
-run("Collect Garbage");
 print("All done!");
 print("Status: " + final_status);
 print("Message: " + final_message);
 print("************************************");
+closeImageJAfterCv3d();

@@ -350,6 +350,8 @@ Check ImageJ/source outputs
 
 The app checks whether expected source files exist. This check is intentionally lightweight for large STL files. It checks existence and file size rather than parsing the full STL.
 
+CV3D currently assumes that coordinates in all imported or generated STL files are in **micrometres (µm)**. This includes externally supplied STL files; no automatic unit conversion is inferred from the STL itself.
+
 The report lists whether the following files exist:
 
 - head NRRD
@@ -417,13 +419,15 @@ After Step 02 is complete, click:
 Launch R local height calculation: eyeX
 ```
 
-The app asks for the local-height search diameter. The default is based on the facet-size estimate:
+This step converts the corneal STL into triangle-centre/normal points and calculates the local height of each triangle centre relative to a reference plane estimated from a **spherical Euclidean neighbourhood**.
+
+The app asks for the neighbourhood **radius**. The current default suggestion is:
 
 ```text
-local-height search diameter = facet_size_estimate x 3
+local-height neighbourhood radius = facet_size_estimate x 0.5
 ```
 
-This step converts the corneal STL into triangle/normal points and calculates local heights.
+The intended neighbourhood should span enough of the eye surface that the reference plane represents the underlying corneal curvature instead of following the relief of individual facets. The default is therefore set to half the estimated facet size as a practical starting value and can be adjusted for the dataset.
 
 Expected outputs:
 
@@ -433,13 +437,18 @@ CVxxxx_CV3D/eyeX/03_CVxxxx_eyeX_local_heights.csv
 CVxxxx_CV3D/eyeX/inspection/03_CVxxxx_eyeX_local_height_threshold_plot.png
 ```
 
-The search diameter should be large enough to cover a meaningful local neighbourhood, but not so large that separate local structures are over-smoothed.
+The local-height table contains several related quantities:
 
-```{r fig-15-local-height-search-diameter, fig.cap="Prompt for the local-height search diameter of Step 03A. Left: raw local height values. Right: log-transformed, percentile-clipped local heights.", out.width="33%", fig.align="center", fig.pos="H"}
-knitr::include_graphics("docs/images/local_height_search_diameter.png")
-```
+- `local_height`: the raw geometric local height in µm;
+- `local_height_col`: a greyscale representation of the raw values;
+- `local_height_filtered_col`: the same raw values with the colour range clipped at the 10th and 90th percentiles by default; and
+- `local_height_contrast`: a peak-enhanced 0--1 contrast scale. CV3D applies the historical `10^local_height` transform, clips the transformed values at the 50th and 90th percentiles by default, and rescales the result to 0--1.
 
-```{r fig-15-2-local-heights, fig.cap="Results of local heights calculation Step 03A. Left: raw local height values. Right: log-transformed, percentile-clipped local heights.", out.width="66%", fig.align="center", fig.pos="H"}
+The exponentiated contrast scale is a monotonic transformation intended to make facet peaks easier to inspect and threshold; it is not a separate geometric measurement.
+
+Where surface normals are available, the local-height QC windows use CV3D's standardised face-on view: the mean unit surface normal defines the viewing direction and the greater face-on eye extent is placed vertically. This changes only the view, not the analysed coordinates. Full-eye comparison representations are centred independently for display and placed side by side at 1.1 reference-eye-width intervals.
+
+```{r fig-15-2-local-heights, fig.cap="Step 03A local-height quality control. The workflow retains the raw geometric height and provides clipped-colour and peak-enhanced contrast representations for inspection and threshold selection.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/local_heights_results.png")
 ```
 ---
@@ -452,7 +461,12 @@ After Step 03A, click:
 Normalize local heights (optional): eyeX
 ```
 
-This creates a normalized local-height table that can be used for thresholding. Normalization is optional, but often useful when raw local-height values vary strongly across the surface.
+Normalization is useful when the magnitude of raw facet relief varies across the eye. Within each spherical neighbourhood, CV3D clips the selected local-height values to configurable lower and upper quantiles (10th and 90th percentiles by default), rescales them to 0--1, and averages the values contributed by overlapping neighbourhoods. Points for which no valid local normalization can be calculated remain `NA` rather than receiving an artificial fallback value.
+
+The normalized table includes:
+
+- `local_height_norm`: locally normalized height on a 0--1 scale; and
+- `local_height_norm_contrast`: peak-enhanced normalized contrast, calculated from `10^local_height_norm` and rescaled back to 0--1.
 
 Expected output:
 
@@ -460,7 +474,7 @@ Expected output:
 CVxxxx_CV3D/eyeX/03_CVxxxx_eyeX_local_heights_normalized.csv
 ```
 
-```{r fig-16-normalized-local-heights, fig.cap="Normalized local-height values shown as a 3D quality-control plot. Left: raw local height values. Middle: log-transformed, percentile-clipped local heights. Right: normalized log-transformed, percentile-clipped local heights.", out.width="85%", fig.align="center", fig.pos="H"}
+```{r fig-16-normalized-local-heights, fig.cap="Local-height normalization quality control. Raw/local contrast and locally normalized representations can be compared while threshold-oriented derived variables remain on a 0--1 scale.", out.width="85%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/normalized_local_heights.png")
 ```
 ---
@@ -473,25 +487,19 @@ Click:
 Run local-height thresholding: eyeX
 ```
 
-The app asks whether to threshold:
+The app asks whether to threshold the peak-enhanced contrast derived from:
 
-- raw local heights, or
-- normalized local heights, if available
+- raw local heights (`local_height_contrast`), or
+- normalized local heights (`local_height_norm_contrast`), if available.
 
-If normalized local heights are present, they should be selected by default. If not, raw local heights are used.
-
-The first prompt asks for a preview threshold range:
+If normalized local heights are present, they are selected by default. Both threshold variables are scaled from **0 to 1**, so the preview range defaults to:
 
 ```text
-normalized values: default 0 to 1
-raw values: default 5 to 30
+minimum = 0
+maximum = 1
 ```
 
-```{r fig-17-1-threshold-prompt, fig.cap="Prompt for the local height thresholding of Step 03B.", out.width="40%", fig.align="center", fig.pos="H"}
-knitr::include_graphics("docs/images/threshold_prompt9.png")
-```
-
-The app creates and opens a threshold preview. After inspecting it, choose the final threshold.
+The app first creates a preview showing the contrast distribution. After inspecting the preview, choose the final threshold within the same 0--1 range. Points at or above that value are retained for candidate condensation.
 
 Expected output:
 
@@ -500,12 +508,8 @@ CVxxxx_CV3D/eyeX/03_CVxxxx_eyeX_local_height_thresholded.csv
 CVxxxx_CV3D/eyeX/inspection/03B_CVxxxx_eyeX_local_height.png
 ```
 
-```{r fig-17-threshold-preview, fig.cap="Local-height threshold preview. In this example, a threshold of 9 separates facet peaks from the surrounding valleys.", out.width="100%", fig.align="center", fig.pos="H"}
-knitr::include_graphics("docs/images/threshold_preview.png")
-```
-```{r fig-18-thresholded-points, fig.cap="Final thresholded local-height points after Step 03B.", out.width="50%", fig.align="center", fig.pos="H"}
-knitr::include_graphics("docs/images/threshold_results9.png")
-```
+The thresholded CSV stores the selected 3D points and their 0--1 `height_value`, which is subsequently used as the condensation weight in Step 03C.
+
 ---
 
 # Step 03C: Facet candidate condensation
@@ -517,6 +521,9 @@ Run facet candidate condensation: eyeX
 ```
 
 Step 03C reduces the thresholded local-height point cloud from Step 03B to one candidate point per likely ommatidium/facet. The function does this by iteratively moving nearby high local-height points toward local density modes and then merging points that have converged to the same local maximum.
+
+> **Spatial units:** All mesh and point-cloud coordinates are currently assumed to be in micrometres (µm). The corneal-projection sphere diameter is entered in centimetres in the UI and converted internally to micrometres.
+
 
 ## Parameters
 
@@ -536,7 +543,7 @@ Smaller values keep nearby facets more separate but may leave too many candidate
 
 ### Merge radius
 
-The merge radius defines how close condensed points must be after convergence to be treated as the same candidate. It is applied after the iterative movement step.
+The merge radius defines the maximum diameter of a final condensed group. CV3D uses complete-linkage clustering after the iterative movement step: **all pairwise distances within a candidate group must be less than or equal to the merge radius**. This prevents chains of individually close points from bridging two distinct facet peaks.
 
 A good default is:
 
@@ -558,7 +565,7 @@ A value of:
 2
 ```
 
-is a good default. It gives stronger influence to points with high local-height values, so points tend to converge toward local peaks rather than toward the simple geometric centre of all neighbours.
+is a good default. For the non-negative 0--1 contrast values produced by Step 03B, weights are calculated directly as `height_value^weight_exponent`; the values are not shifted before weighting. This gives stronger influence to high-contrast facet peaks while preserving the meaning of the 0--1 scale. A shift is applied only if a custom input height column contains negative values.
 
 Lower values make the movement more spatially even. Higher values make the highest local-height points dominate more strongly.
 
@@ -793,14 +800,14 @@ Step 05A uses the checked facet positions from Step 04 to calculate facet-level 
 CVxxxx_CV3D/eyeX/04_CVxxxx_eyeX_facet_positions.csv
 ```
 
-Click the 05A button for the relevant eye. The app writes the main optical output files into the eye folder:
+Click the 05A button for the relevant eye. Facet neighbours are identified from **local tangent-plane geometry**: nearby facet centres are projected into a locally fitted surface plane and triangulated there, while candidate links are filtered using their three-dimensional spacing. This avoids assuming that the complete eye is spherical or that the eye centroid is a centre of curvature. Choose the local sampling lattice used for Snyder's calculations; **Hexagonal** is the default, with **Square** available as an alternative. The lattice changes Snyder's eye parameter and sampling frequency, while `acuity_cpd` remains $1/(2\Delta\phi)$ with $\Delta\phi$ in degrees. CV3D reports this as a local anatomical acuity estimate using the interommatidial-angle relationship used by Feller et al. (2020), rather than as a behavioural acuity measurement. The app writes the main optical output files into the eye folder:
 
 ```text
 eyeX/05A_CVxxxx_eyeX_optic_parameters.csv
 eyeX/05A_CVxxxx_eyeX_facet_normals.csv
 eyeX/05A_CVxxxx_eyeX_facet_sizes.csv
 eyeX/05A_CVxxxx_eyeX_interfacet_angles.csv
-eyeX/05A_CVxxxx_eyeX_sensitivity_acuity.csv
+eyeX/05A_CVxxxx_eyeX_sampling_acuity.csv
 eyeX/05A_CVxxxx_eyeX_optical_summary.csv
 ```
 
@@ -809,11 +816,13 @@ Important columns in later export tables include:
 ```text
 facet_size_um
 interfacet_angle_deg
-sensitivity
-CPD
+sampling_lattice
+eye_parameter
+sampling_frequency_rad
+acuity_cpd
 ```
 
-Use the 05A QC plot buttons to inspect optic parameters, facet normals, and selected labelled metrics. The facet-normal plot asks for normal length as a multiple of facet size; the default is 5 times facet size.
+Use the 05A QC plot buttons to inspect optic parameters, facet normals, and selected labelled metrics. Optic-parameter, facet-normal, and labelled-metric QC plots use the standardised face-on view when facet normals are available. The facet-normal plot asks for normal length as a multiple of facet size; the default is 5 times facet size.
 
 ```{r fig-30-r-analysis-05a, fig.cap="05A optical metric outputs.", out.width="75%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/r_analysis_05a_outputs.png")
@@ -849,7 +858,7 @@ knitr::include_graphics("docs/images/r_analysis_05b_outputs_3D.png")
 
 ## Step 05C: Corneal projections
 
-Step 05C projects the globally aligned facet points onto a projection sphere and writes latitude/longitude coordinates. These outputs make the compound eye spatially interpretable in a standardized two-dimensional angular coordinate system.
+Step 05C projects the globally aligned facet points onto a projection sphere and writes elevation/azimuth coordinates. These outputs make the compound eye spatially interpretable in a standardized two-dimensional angular coordinate system.
 
 Click the 05C button for the relevant eye. The default projection centre is:
 
@@ -857,7 +866,7 @@ Click the 05C button for the relevant eye. The default projection centre is:
 Center between eyes
 ```
 
-If only one eye is available, the same dialog can still be used; check the parameters before running. The projection sphere size is entered in centimetres in the dialog and stored internally in micrometres.
+When both real-eye global-coordinate tables are available, **Center between eyes** is the midpoint between the two eye centroids. If only one eye is available, CV3D estimates the between-eye centre by projecting that eye centroid onto the anatomical midline (`x = 0`); the output records whether the centre was measured from both eyes or estimated from one eye. The projection sphere size is entered in centimetres in the dialog and converted internally to micrometres.
 
 Expected output:
 
@@ -865,7 +874,7 @@ Expected output:
 eyeX/05C_CVxxxx_eyeX_corneal_projections.csv
 ```
 
-The 05C QC plot button creates corneal-projection plots, including latitude/longitude plots and 2D projection views. The optional rgl inspection window can be used for interactive 3D checking.
+The 05C QC plot button creates corneal-projection plots, including elevation/azimuth plots and 2D projection views. The optional rgl inspection window can be used for interactive 3D checking.
 
 ```{r fig-32-r-analysis-05c, fig.cap="05C corneal projection on a 15 cm sphere.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/r_analysis_05c_output_s.png")
@@ -981,21 +990,25 @@ norm.y_global
 norm.z_global
 facet_size_um
 interfacet_angle_deg
-sensitivity
-CPD
+eye_parameter
+sampling_frequency_rad
+sampling_lattice
+acuity_cpd
 corn.proj.x
 corn.proj.y
 corn.proj.z
-latitude
-longitude
+elevation
+azimuth
 projection_sphere_center_x
 projection_sphere_center_y
 projection_sphere_center_z
 projection_sphere_radius_um
+projection_sphere_size_cm
 projection_center_mode
+projection_center_source
 ```
 
-The QC PDF report creates a compact specimen-level document with metadata, summary tables, optic-parameter barplots, and a corneal projection latitude/longitude plot.
+The QC PDF report creates a compact specimen-level document with metadata, summary tables, optic-parameter barplots, and a corneal projection elevation/azimuth plot.
 
 ```{r fig-35-results-export, fig.cap="Results / Export page with readiness, table export, PDF report, ZIP export, and final export folder.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/results_export_page.png")
@@ -1046,7 +1059,7 @@ CV0001_CV3D/
 |  |--- 05A_CV0001_eye1_facet_normals.csv
 |  |--- 05A_CV0001_eye1_facet_sizes.csv
 |  |--- 05A_CV0001_eye1_interfacet_angles.csv
-|  |--- 05A_CV0001_eye1_sensitivity_acuity.csv
+|  |--- 05A_CV0001_eye1_sampling_acuity.csv
 |  |--- 05A_CV0001_eye1_optical_summary.csv
 |  |--- 05B_CV0001_eye1_landmark_referenced_coordinates.csv
 |  |--- 05B_CV0001_eye1_global_aligned_pointcloud.csv
@@ -1156,7 +1169,7 @@ eyeX/05B_CVxxxx_eyeX_global_coordinate_metadata_roi_reference.csv
 
 ## 05C corneal projection looks shifted
 
-Check the 05C parameters in the task/status JSON and rerun Step 05C if needed. The default projection centre is `Center between eyes`.
+Check the 05C parameters in the task/status JSON and rerun Step 05C if needed. The default projection centre is `Center between eyes`; its provenance is recorded as measured from both eyes or estimated from one eye.
 
 ## Mirroring overwrote the target eye
 
@@ -1174,7 +1187,7 @@ Use **Open final export folder** in the Results / Export tab.
 
 ## QC PDF report does not open or is empty
 
-First generate the analysis-ready tables, then generate the QC PDF report. If the source tables contain no valid CPD or latitude/longitude values, the report can still be generated, but the corneal projection plot may be empty or labelled as unavailable.
+First generate the analysis-ready tables, then generate the QC PDF report. If the source tables contain no valid acuity_cpd or elevation/azimuth values, the report can still be generated, but the corneal projection plot may be empty or labelled as unavailable.
 
 ---
 
@@ -1213,7 +1226,7 @@ First generate the analysis-ready tables, then generate the QC PDF report. If th
 - `eyeX/05A_CVxxxx_eyeX_facet_normals.csv` - Facet positions and normals used for normal QC plots.
 - `eyeX/05A_CVxxxx_eyeX_facet_sizes.csv` - Facet-size measurements.
 - `eyeX/05A_CVxxxx_eyeX_interfacet_angles.csv` - Interfacet-angle measurements.
-- `eyeX/05A_CVxxxx_eyeX_sensitivity_acuity.csv` - Sensitivity and CPD-related optical outputs.
+- `eyeX/05A_CVxxxx_eyeX_sampling_acuity.csv` - Snyder eye parameter/sampling frequency and local anatomical acuity outputs.
 - `eyeX/05A_CVxxxx_eyeX_optical_summary.csv` - Eye-level optical summary values.
 
 ## R Step 05B outputs
@@ -1227,7 +1240,7 @@ First generate the analysis-ready tables, then generate the QC PDF report. If th
 
 ## R Step 05C outputs
 
-- `eyeX/05C_CVxxxx_eyeX_corneal_projections.csv` - Facet-level corneal projection coordinates, latitude, and longitude.
+- `eyeX/05C_CVxxxx_eyeX_corneal_projections.csv` - Facet-level corneal projection coordinates, elevation, and azimuth.
 
 ## Results / Export outputs
 

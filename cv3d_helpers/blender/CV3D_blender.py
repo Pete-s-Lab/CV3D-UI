@@ -3,7 +3,7 @@ bl_info = {
     "blender": (3, 0, 0),
     "category": "View3D",
     "author": "Peter T. Rühr",
-    "version": (0, 0, 9031),
+    "version": (0, 0, 9032),
     "description": "CV3D Blender helper. Interactive CV3D cornea extraction and later facet-position helper tools.",
 }
 
@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 
 
-CV3D_BLENDER_SCRIPT_VERSION = "0.0.9031-cv3d-step04-fast-candidates-landmark-scale"
+CV3D_BLENDER_SCRIPT_VERSION = "0.0.9035-facet-id-format-standardization"
 
 
 # ---------------------------------------------------------------------
@@ -58,6 +58,10 @@ def find_task_path_from_argv():
 
 def load_task(task_path):
     path = Path(task_path)
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(f"CV3D task file not found: {path}")
 
@@ -82,19 +86,27 @@ def load_task(task_path):
 
 
 def task_base_dir(task=None):
-    raw = scene_get("cv3d_task_path", "")
-    if raw:
-        p = Path(raw)
-        try:
-            return p.parents[2]
-        except Exception:
-            return p.parent
     task = task or current_task()
+
+    # Project-relative paths stored in CV3D task JSON are always relative to
+    # the dataset analysis folder, not to the json/ folder containing the task.
     af = task.get("analysis_folder", "")
     if af:
         p = Path(str(af))
         if p.is_absolute():
             return p
+
+    raw = scene_get("cv3d_task_path", "")
+    if raw:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        else:
+            p = p.resolve()
+        if p.parent.name.lower() == "json":
+            return p.parent.parent
+        return p.parent
+
     return Path.cwd()
 
 
@@ -713,12 +725,102 @@ def task_facet_size_estimate_or_none():
     return None
 
 
+def is_canonical_facet_name(name):
+    text = str(name or "").strip()
+    return bool(re.fullmatch(r"F\d{5}", text))
+
+
+def extract_numeric_suffix(value):
+    text = str(value or "").strip()
+    m = re.search(r"(\d+)$", text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def format_imported_facet_name(value):
+    idx = extract_numeric_suffix(value)
+    if idx is None or idx < 0 or idx > 99999:
+        return None
+    return f"F{idx:05d}"
+
+
+def next_manual_facet_name(existing_names):
+    used = {str(name or "").strip() for name in existing_names if str(name or "").strip()}
+    taken = []
+    for name in used:
+        if is_canonical_facet_name(name) and name.startswith("F9"):
+            try:
+                taken.append(int(name[1:]))
+            except Exception:
+                pass
+    next_num = max(taken, default=90000) + 1
+    if next_num > 99999:
+        raise ValueError("No free manual facet IDs remain in the F9XXXX range.")
+    return f"F{next_num:05d}"
+
+
+def candidate_name_from_row(row, fallback_index=None):
+    for key in ("blender_object_name", "facet_candidate_id", "ID", "facet_id"):
+        canonical = format_imported_facet_name(row.get(key, ""))
+        if canonical is not None:
+            return canonical
+    if fallback_index is not None:
+        return f"F{int(fallback_index):05d}"
+    return None
+
+
+def canonicalize_facet_candidate_object_names(objects, rename_manual=True):
+    used = set()
+    rename_map = {}
+
+    # First keep already canonical names unchanged.
+    for obj in objects:
+        current = str(obj.name or "").strip()
+        if is_canonical_facet_name(current):
+            rename_map[obj] = current
+            used.add(current)
+
+    # Second assign canonical imported IDs wherever possible.
+    for obj in objects:
+        if obj in rename_map:
+            continue
+        source_row = {}
+        try:
+            source_row = json.loads(obj.get("cv3d_source_row", "{}") or "{}")
+        except Exception:
+            source_row = {}
+        proposed = candidate_name_from_row(source_row) or format_imported_facet_name(obj.name)
+        if proposed and proposed not in used:
+            rename_map[obj] = proposed
+            used.add(proposed)
+
+    # Finally, assign manual F9XXXX IDs to remaining objects.
+    if rename_manual:
+        for obj in objects:
+            if obj in rename_map:
+                continue
+            proposed = next_manual_facet_name(used)
+            rename_map[obj] = proposed
+            used.add(proposed)
+
+    changed = 0
+    for obj, new_name in rename_map.items():
+        if str(obj.name) != str(new_name):
+            obj.name = str(new_name)
+            changed += 1
+    return changed
+
+
 def facet_candidate_sphere_radius():
     facet_size = task_facet_size_estimate_or_none()
     if facet_size is None:
-        return 8.0
-    # Standard candidate diameter = one third of the facet estimate.
-    return max(facet_size / 6.0, 0.0001)
+        return 12.0
+    # Candidate markers are 1.5x the previous size: diameter = one half of the facet estimate.
+    return max(facet_size / 4.0, 0.0001)
 
 
 def landmark_sphere_radius():
@@ -780,12 +882,12 @@ def import_facet_candidates_from_task():
             x = float(row.get("x", 0))
             y = float(row.get("y", 0))
             z = float(row.get("z", 0))
-            point_id = row.get("facet_candidate_id") or row.get("ID") or row.get("facet_id") or str(count + 1)
+            point_id = candidate_name_from_row(row, fallback_index=(count + 1))
 
             obj = template.copy()
             obj.data = template.data  # shared mesh data for speed and low memory use
             obj.location = (x, y, z)
-            obj.name = f"facet_candidate_{point_id}"
+            obj.name = str(point_id)
             obj["cv3d_source_row"] = json.dumps(row)
             coll.objects.link(obj)
             count += 1
@@ -804,6 +906,7 @@ def export_facet_positions_to_csv():
         raise ValueError("Task has no output_facet_positions_abs.")
 
     objs = [obj for obj in collection_objects("CV3D_facet_candidates") if obj.type in {"MESH", "EMPTY"}]
+    renamed = canonicalize_facet_candidate_object_names(objs, rename_manual=True)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
@@ -814,8 +917,11 @@ def export_facet_positions_to_csv():
             writer.writerow({
                 "cv_id": task.get("cv_id", ""),
                 "eye": task.get("eye", ""),
-                "facet_id": f"F{i:06d}",
-                "blender_object_name": obj.name,
+                # Blender object names are the authoritative external facet IDs.
+                # This keeps all downstream R outputs/plots keyed to exactly the
+                # names the user sees and edits in Blender.
+                "facet_id": str(obj.name),
+                "blender_object_name": str(obj.name),
                 "x": obj.location.x,
                 "y": obj.location.y,
                 "z": obj.location.z,
@@ -825,7 +931,7 @@ def export_facet_positions_to_csv():
             })
 
     bpy.ops.wm.save_as_mainfile(filepath=task.get("input_blend_abs") or bpy.data.filepath)
-    write_status("exported", f"Exported {len(objs)} checked facet positions.", {"facet_position_count": len(objs)})
+    write_status("exported", f"Exported {len(objs)} checked facet positions.", {"facet_position_count": len(objs), "renamed_before_export": renamed})
     return len(objs)
 
 
@@ -841,33 +947,83 @@ def setup_facet_checking_scene():
 
 def setup_head_landmark_scene():
     task = current_task()
-    head_mesh = resolve_task_stored_path(task.get("input_head_mesh_abs", ""), task)
+    head_mesh = resolve_task_stored_path(task.get("input_head_mesh_abs") or task.get("input_head_mesh", ""), task)
     output_blend = resolve_task_stored_path(task.get("output_blend_abs", ""), task)
     if not head_mesh or not Path(head_mesh).exists():
         raise FileNotFoundError(f"Head mesh STL not found: {head_mesh}")
 
-    if not collection_objects("CV3D_head_mesh"):
-        objs = import_stl(head_mesh)
+    head_coll = get_or_create_collection("CV3D_head_mesh")
+    # A previous incomplete .blend can contain a stale collection or hidden objects.
+    # Treat only actual mesh objects as a valid loaded head.
+    head_objs = [obj for obj in collection_objects("CV3D_head_mesh") if obj.type == "MESH"]
+    if not head_objs:
+        clear_collection("CV3D_head_mesh")
+        imported = import_stl(head_mesh)
+        head_objs = [obj for obj in imported if obj.type == "MESH"]
+        if not head_objs:
+            raise RuntimeError(f"Blender did not create a mesh object while importing: {head_mesh}")
+
         mat = create_cv3d_material("CV3D_head_mesh_grey", (0.65, 0.65, 0.65, 1.0))
-        for i, obj in enumerate(objs):
+        for i, obj in enumerate(head_objs):
             obj.name = "CV3D_head_mesh" if i == 0 else f"CV3D_head_mesh_{i+1}"
-            obj.data.materials.append(mat)
+            if not obj.data.materials:
+                obj.data.materials.append(mat)
+            else:
+                obj.data.materials[0] = mat
             obj.lock_location = (True, True, True)
             obj.lock_rotation = (True, True, True)
             obj.lock_scale = (True, True, True)
             link_object_to_collection(obj, "CV3D_head_mesh")
-        scene_set("cv3d_head_mesh_imported", True)
 
-    get_or_create_collection("CV3D_landmarks")
+    # Ensure an existing/stale scene cannot leave the head hidden or off-screen.
     set_collection_visibility("CV3D_head_mesh", True)
+    try:
+        if head_coll.name not in bpy.context.scene.collection.children:
+            bpy.context.scene.collection.children.link(head_coll)
+    except Exception:
+        pass
+
+    ensure_object_mode()
+    try:
+        bpy.ops.object.select_all(action="DESELECT")
+    except Exception:
+        pass
+    for obj in head_objs:
+        try:
+            obj.hide_set(False)
+        except Exception:
+            pass
+        obj.hide_viewport = False
+        obj.hide_render = False
+        obj.select_set(True)
+    if head_objs:
+        bpy.context.view_layer.objects.active = head_objs[0]
+
+    scene_set("cv3d_head_mesh_imported", True)
+    get_or_create_collection("CV3D_landmarks")
     set_collection_visibility("CV3D_landmarks", True)
     setup_view()
-    shift_c_view_all()
+
+    framed = False
+    for area in bpy.context.screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        for region in area.regions:
+            if region.type != "WINDOW":
+                continue
+            try:
+                with bpy.context.temp_override(area=area, region=region):
+                    bpy.ops.view3d.view_selected(use_all_regions=False)
+                framed = True
+            except Exception:
+                pass
+    if not framed:
+        shift_c_view_all()
 
     if output_blend:
         Path(output_blend).parent.mkdir(parents=True, exist_ok=True)
         bpy.ops.wm.save_as_mainfile(filepath=output_blend)
-    write_status("running", "Head mesh ready; waiting for landmark placement/export.")
+    write_status("running", f"Head mesh ready ({len(head_objs)} mesh object(s)); waiting for landmark placement/export.")
 
 
 def place_landmark(name):
@@ -952,7 +1108,8 @@ class CV3D_OT_AddFacetCandidateAtCursor(bpy.types.Operator):
             loc = bpy.context.scene.cursor.location.copy()
             bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=8, radius=radius, location=loc)
             obj = bpy.context.object
-            obj.name = "facet_candidate_manual"
+            existing_names = [o.name for o in collection_objects("CV3D_facet_candidates")]
+            obj.name = next_manual_facet_name(existing_names)
             obj.data.materials.append(mat)
             link_object_to_collection(obj, "CV3D_facet_candidates")
             self.report({"INFO"}, "Added facet candidate at 3D cursor.")

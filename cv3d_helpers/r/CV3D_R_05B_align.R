@@ -376,7 +376,8 @@ main <- function() {
       norm.x = NA_real_,
       norm.y = NA_real_,
       norm.z = NA_real_,
-      size = NA_real_
+      facet_size = NA_real_,
+      facet_size_smoothed = NA_real_
     )
 
   common_cols <- union(names(facets_ref), names(lm_ref))
@@ -388,7 +389,7 @@ main <- function() {
     "x_reference", "y_reference", "z_reference",
     "norm.x_original", "norm.y_original", "norm.z_original",
     "norm.x_reference", "norm.y_reference", "norm.z_reference",
-    "size", "delta_phi.deg", "delta_phi.rad", "P", "v", "CPD", "number.of.neighbours", "neighbours"
+    "facet_size", "facet_size_smoothed", "interfacet_angle_deg", "interfacet_angle_rad", "sampling_lattice", "eye_parameter", "sampling_frequency_rad", "acuity_cpd", "number_of_neighbours", "neighbours"
   )
   reference_pointcloud <- select_existing_cols(combined, reference_cols)
 
@@ -398,10 +399,10 @@ main <- function() {
   message("Running CV3D::align_pointcloud() with priority=", priority)
   aligned <- CV3D::align_pointcloud(
     df = combined,
-    ref_x = "x", ref_y = "y", ref_z = "z",
-    data_x = "norm.x", data_y = "norm.y", data_z = "norm.z",
+    coord_x = "x", coord_y = "y", coord_z = "z",
+    vector_x = "norm.x", vector_y = "norm.y", vector_z = "norm.z",
     landmark_col = "ID",
-    names = list(anterior = "anterior", posterior = "posterior", left = "left", right = "right"),
+    landmark_names = list(anterior = "anterior", posterior = "posterior", left = "left", right = "right"),
     priority = priority
   )
 
@@ -428,7 +429,7 @@ main <- function() {
       "norm.x_original", "norm.y_original", "norm.z_original",
       "norm.x_reference", "norm.y_reference", "norm.z_reference",
       "norm.x_global", "norm.y_global", "norm.z_global",
-      "size", "delta_phi.deg", "delta_phi.rad", "P", "v", "CPD", "number.of.neighbours", "neighbours"
+      "facet_size", "facet_size_smoothed", "interfacet_angle_deg", "interfacet_angle_rad", "sampling_lattice", "eye_parameter", "sampling_frequency_rad", "acuity_cpd", "number_of_neighbours", "neighbours"
     ))
 
   facets_out <- aligned_pointcloud %>%
@@ -441,7 +442,7 @@ main <- function() {
       "norm.x_original", "norm.y_original", "norm.z_original",
       "norm.x_reference", "norm.y_reference", "norm.z_reference",
       "norm.x_global", "norm.y_global", "norm.z_global",
-      "size", "delta_phi.deg", "delta_phi.rad", "P", "v", "CPD", "number.of.neighbours", "neighbours"
+      "facet_size", "facet_size_smoothed", "interfacet_angle_deg", "interfacet_angle_rad", "sampling_lattice", "eye_parameter", "sampling_frequency_rad", "acuity_cpd", "number_of_neighbours", "neighbours"
     ))
 
   matrix_rows <- tibble::tibble(

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
+import re
 import shutil
 import sys
 import subprocess
 import zipfile
-import base64
 import zlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,14 +29,43 @@ try:
     )
 except ImportError as e:
     raise SystemExit(
-        "PySide6 is required for this prototype.\n"
+        "PySide6 is required for CV3D UI.\n"
         "Install with: pip install PySide6\n"
     ) from e
 
 
-APP_VERSION = "0.1.85"
+APP_VERSION = "0.1.114"
 
 CHANGELOG = [
+    "0.1.114: Renamed 05A plot actions, moved normals into Choose facet value, defaulted optional rgl views to on, and added a normal-vector visibility toggle with a dedicated normals-options dialog.",
+    "0.1.113: Defaulted facet-sphere diameter scaling to 2x and consolidated plot inputs into one options dialog per plot action; dataset creation source inputs are also collected in one dialog.",
+    "0.1.112: Shortened R Analysis action labels and added user-scalable facet-sphere diameters for 05A/05B/05C rgl QC plots (1x = facet size, 0 = legacy plot size, dataset estimate used as fallback).",
+    "0.1.111: Batched all direction-coloured 05A normal vectors into one rgl segments3d call, duplicating each facet colour for both segment endpoints and preserving the stable 0.1.109 window lifecycle.",
+    "0.1.110: Restored direction colour on each 05A normal vector using scalar-colour segment drawing while preserving the stable 0.1.109 rgl lifecycle.",
+    "0.1.109: Reset the 05A normals rgl path to the last known-working implementation, retained direction coding on facet positions, removed Unicode from native-rgl text, and stopped swallowing rgl errors.",
+    "0.1.108: Restored the proven 03A/03B native-rgl lifetime pattern for all 05A interactive plots.",
+    "0.1.107: Fixed 05A interactive rgl lifetime by allowing the native device to initialise before polling and using cur3d()/rgl.dev.list() with startup grace.",
+    "0.1.106: Restored the proven rgl current-device keep-open loop for 05A interactive plots and removed both spellings of n_neighbours_used from metric choices.",
+    "0.1.105: Kept interactive 05A rgl plots alive until the user closes them and simplified the selected-metric dropdown.",
+    "0.1.104: Fixed 05A direction-coloured normal plotting and hid normal-estimator provenance fields from the generic 05A value-plot selector.",
+    "0.1.103: Added selectable regularised facet-centre envelope normals for 05A, defaulting to 1.25x, and direction-coloured normal QC plotting.",
+    "0.1.102: Standardised Step 04 facet IDs to FXXXXX and reserved F9XXXX for manually added facets.",
+    "0.1.101: Made Blender object names authoritative facet identifiers for Step 04 exports and downstream optical analyses.",
+    "0.1.100: Added an in-dialog explanation of the 05A neighbour-link tolerance parameter.",
+    "0.1.99: Fixed specimen-level Blender task path resolution so head meshes and status files resolve from the dataset root rather than the json subfolder.",
+    "0.1.98: Made specimen head-mesh loading for Blender head landmarking robust to stale/hidden head collections and explicitly frames the loaded head mesh.",
+    "0.1.97: Increased Blender facet-candidate marker size to 1.5x the previous size.",
+    "0.1.96: Automatically open the facet-candidate local-height inspection plot after successful 03C condensation.",
+    "0.1.95: Fixed automatic post-03B interactive plotting and made the 03B preview use the selected colour-scale limits in a single eye panel.",
+    "0.1.94: Keep the automatically launched 03B thresholded-point rgl plot open for inspection until the user closes it.",
+    "0.1.93: Automatically create the thresholded local-height 3D PNG after successful 03B thresholding.",
+    "0.1.92: Clarified 03A2 normalization defaults, streamlined action-button labels, and added a visible blocking-process indicator.",
+    "0.1.91: Streamlined ImageJ STL extraction: multi-target runs share one Fiji session, accepted thresholds carry forward, and head export uses the preview surface.",
+    "0.1.90: Replaced global spherical facet-neighbour inference with CV3D local tangent-plane neighbour detection in 05A.",
+    "0.1.89: Final consolidation pass: documentation alignment, robust legacy contrast plotting, and publication-facing cleanup.",
+    "0.1.88: Consolidated publication-facing geometry/optics nomenclature, 0-1 local-height contrast handling, projection-centre persistence, bilateral CP centring, circular azimuth summaries, and explicit micrometre units.",
+    "0.1.87: Added square/hexagonal lattice selection for Snyder eye parameter and sampling frequency while keeping Feller CPD separate.",
+    "0.1.86: Updated 05C projection geometry to CV3D ray-sphere intersections and elevation/azimuth view angles.",
     "0.1.85: Updated the UI and bundled helpers to use the renamed CV3D R package namespace and CV3D branding.",
     "0.1.83: Improved Results/Export QC PDF typography, path wrapping, PDF-safe status symbols, rotated table headers, and stricter equal-unit plot panels.",
     "0.1.82: Polished Results/Export QC PDF text/layout, removed landmark-reference panels, enforced equal-unit coordinate panels, and embeds 05C rgl snapshots.",
@@ -138,6 +168,7 @@ PARAM_DISPLAY_NAMES = {
     "edge_tol": "Neighbour-link tolerance",
     "cores": "CPU cores",
     "normal_length_facet_size_factor": "Normal length (x facet size)",
+    "neighbourhood_radius": "Neighbourhood radius",
 }
 
 EYES = ["eye1", "eye2"]
@@ -231,11 +262,6 @@ STATE_SYMBOL = {
     "outdated_export": "↻",
 }
 
-
-# A tiny valid PNG used for dummy visual-inspection outputs.
-TINY_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/ax2V7sAAAAASUVORK5CYII="
-)
 
 
 def now() -> str:
@@ -400,10 +426,6 @@ def write_csv(path: Path, fieldnames: List[str], rows: List[Dict[str, Any]]) -> 
         writer.writerows(rows)
 
 
-def write_dummy_png(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(TINY_PNG)
-
 
 def configured_file_path(value: Any) -> Optional[Path]:
     """Return a real file path from a settings value, resolving relative helper paths against the app folder."""
@@ -491,10 +513,6 @@ def load_app_settings() -> Dict[str, Any]:
         settings.setdefault("r_step05b_qc_plot_script_path", "")
         settings.setdefault("r_step05c_qc_plot_script_path", "")
         settings.setdefault("r_facet_point_plot_script_path", "")
-        settings.setdefault("engine_modes", {"imagej": "dummy", "blender": "dummy", "r": "dummy"})
-        settings["engine_modes"].setdefault("imagej", "dummy")
-        settings["engine_modes"].setdefault("blender", "dummy")
-        settings["engine_modes"].setdefault("r", "dummy")
         settings.setdefault("compute_settings", detect_recommended_cores())
         settings.setdefault("use_bundled_helpers", True)
         settings = apply_bundled_helper_paths(settings)
@@ -528,11 +546,6 @@ def load_app_settings() -> Dict[str, Any]:
         "r_step05b_qc_plot_script_path": "",
         "r_step05c_qc_plot_script_path": "",
         "r_facet_point_plot_script_path": "",
-        "engine_modes": {
-            "imagej": "dummy",
-            "blender": "dummy",
-            "r": "dummy",
-        },
     }
     settings = apply_bundled_helper_paths(settings)
     save_app_settings(settings)
@@ -654,7 +667,7 @@ def lightweight_file_size_mb(path: Path) -> Optional[float]:
 
 
 def legacy_eye_file_map(cv_id: str, eye: str) -> Dict[str, str]:
-    """Pre-v0.1.6 flat-layout file names, used only to migrate old dummy datasets."""
+    """Pre-v0.1.6 flat-layout file names, used only to migrate legacy datasets."""
     return {
         "nrrd_file": f"01_{cv_id}_{eye}.nrrd",
         "imagej_stl_file": f"01_{cv_id}_{eye}_ImageJ.stl",
@@ -697,7 +710,7 @@ def legacy_eye_file_map(cv_id: str, eye: str) -> Dict[str, str]:
         "r_step05a_status_file": f"05A_{cv_id}_{eye}_R_status.json",
         "facet_sizes_file": f"05_{cv_id}_{eye}_facet_sizes.csv",
         "interfacet_angles_file": f"05_{cv_id}_{eye}_interfacet_angles.csv",
-        "sensitivity_acuity_file": f"05_{cv_id}_{eye}_sensitivity_acuity.csv",
+        "sampling_acuity_file": f"05_{cv_id}_{eye}_sensitivity_acuity.csv",
         "optical_summary_file": f"05_{cv_id}_{eye}_optical_summary.csv",
 
         "r_step05b_task_file": f"05B_{cv_id}_{eye}_R_task.json",
@@ -762,7 +775,7 @@ def eye_file_map(cv_id: str, eye: str) -> Dict[str, str]:
         "facet_normals_file": eye_rel_path(eye, f"05A_{cv_id}_{eye}_facet_normals.csv"),
         "facet_sizes_file": eye_rel_path(eye, f"05A_{cv_id}_{eye}_facet_sizes.csv"),
         "interfacet_angles_file": eye_rel_path(eye, f"05A_{cv_id}_{eye}_interfacet_angles.csv"),
-        "sensitivity_acuity_file": eye_rel_path(eye, f"05A_{cv_id}_{eye}_sensitivity_acuity.csv"),
+        "sampling_acuity_file": eye_rel_path(eye, f"05A_{cv_id}_{eye}_sampling_acuity.csv"),
         "optical_summary_file": eye_rel_path(eye, f"05A_{cv_id}_{eye}_optical_summary.csv"),
 
         "r_step05b_task_file": eye_json_rel_path(eye, f"05B_{cv_id}_{eye}_R_task.json"),
@@ -814,6 +827,10 @@ def migrate_config_to_eye_subfolders(analysis_folder: Path, config: Dict[str, An
     for eye in EYES:
         config.setdefault("eyes", {}).setdefault(eye, {"present": True, "anatomical_side": "unknown", "notes": "", "files": {}})
         files = config["eyes"][eye].setdefault("files", {})
+        # Migrate the pre-0.1.88 internal key without losing existing files.
+        if "sensitivity_acuity_file" in files and "sampling_acuity_file" not in files:
+            files["sampling_acuity_file"] = files.pop("sensitivity_acuity_file")
+            changed = True
         new_defaults = eye_file_map(cv_id, eye)
         old_defaults = legacy_eye_file_map(cv_id, eye)
 
@@ -1052,8 +1069,9 @@ def create_initial_config(
         "parameters": {
             "dataset_defaults": {
                 "facet_size_estimate": 25.0,
-                "local_height_threshold": 12.5,
-                "local_height_normalization_diam": None,
+                "local_height_neighbourhood_radius_factor": 0.5,
+                "local_height_threshold": 0.5,
+                "local_height_normalization_half_width": None,
                 "facet_candidate_neighbour_radius_factor": 0.5,
                 "facet_candidate_merge_radius_factor": 0.3,
                 "facet_candidate_weight_exponent": 2.0,
@@ -1063,6 +1081,9 @@ def create_initial_config(
                 "facet_candidate_select_point": "nearest_mode",
                 "corneal_projection_sphere_size_cm": 15.0,
                 "projection_center_mode": "between_eyes",
+                "sampling_lattice": "hexagonal",
+                "facet_normal_method": "envelope",
+                "facet_normal_envelope_factor": 1.25,
             },
             "eye1_last_used": {},
             "eye2_last_used": {},
@@ -1092,7 +1113,7 @@ def create_initial_config(
             "metadata_json": {"file": f"06_{cv_id}_export_metadata.json", "status": "not_created", "last_created": None},
             "export_manifest": {"file": f"06_{cv_id}_export_manifest.csv", "status": "not_created", "last_created": None},
             "optic_barplots_png": {"file": f"06_{cv_id}_optic_parameter_summary_barplots.png", "status": "not_created", "last_created": None},
-            "cp_latlon_png": {"file": f"06_{cv_id}_corneal_projection_latlon_CPD.png", "status": "not_created", "last_created": None},
+            "cp_view_angles_png": {"file": f"06_{cv_id}_corneal_projection_view_angles_acuity.png", "status": "not_created", "last_created": None},
             "qc_pdf_report": {"file": f"06_{cv_id}_analysis_ready_export_QC_report.pdf", "status": "not_created", "last_created": None},
             "html_report": {"file": f"06_{cv_id}_analysis_ready_export_QC_report.html", "status": "not_created", "last_created": None},
             "parameter_summary": {"file": f"06_{cv_id}_parameter_summary.csv", "status": "not_created", "last_created": None},
@@ -1188,26 +1209,99 @@ def create_initial_status(cv_id: str) -> Dict[str, Any]:
     return status
 
 
+def _rounded_suggested_value(value: Any) -> float:
+    """Round generated/default numeric suggestions without limiting user-entered precision."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number):
+        return 0.0
+    nearest_integer = round(number)
+    if math.isclose(number, nearest_integer, rel_tol=0.0, abs_tol=1e-12):
+        return float(nearest_integer)
+    return round(number, 2)
+
+
+class CompactDoubleSpinBox(QDoubleSpinBox):
+    """Double spin box with compact display and high user-entered precision."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(8)
+
+    def textFromValue(self, value: float) -> str:
+        text = super().textFromValue(value)
+        decimal_point = str(self.locale().decimalPoint())
+        if decimal_point and decimal_point in text:
+            text = text.rstrip("0").rstrip(decimal_point)
+        if text in {"-0", ""}:
+            return "0"
+        return text
+
+    def setSuggestedValue(self, value: Any) -> None:
+        self.setValue(_rounded_suggested_value(value))
+
+
+def get_compact_double(
+    parent,
+    title: str,
+    label_text: str,
+    suggested_value: Any,
+    minimum: float,
+    maximum: float,
+) -> tuple[float, bool]:
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    layout = QVBoxLayout(dlg)
+    label = QLabel(label_text)
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    spin = CompactDoubleSpinBox()
+    spin.setRange(float(minimum), float(maximum))
+    spin.setSuggestedValue(suggested_value)
+    layout.addWidget(spin)
+    buttons = QHBoxLayout()
+    ok_button = QPushButton("OK")
+    cancel_button = QPushButton("Cancel")
+    ok_button.clicked.connect(dlg.accept)
+    cancel_button.clicked.connect(dlg.reject)
+    buttons.addWidget(ok_button)
+    buttons.addWidget(cancel_button)
+    layout.addLayout(buttons)
+    accepted = dlg.exec() == QDialog.Accepted
+    return spin.value(), accepted
+
+
 class RuntimeParamDialog(QDialog):
     def __init__(self, title: str, fields: Dict[str, float], parent=None,
                  show_force_matrix: bool = False, force_matrix_checked: bool = False,
-                 show_projection_center: bool = False):
+                 show_projection_center: bool = False,
+                 projection_center_default: str = "between_eyes",
+                 show_lattice: bool = False, lattice_default: str = "hexagonal",
+                 show_normal_method: bool = False,
+                 normal_method_default: str = "envelope",
+                 normal_envelope_factor_default: float = 1.25,
+                 info_text: str = ""):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.values: Dict[str, Any] = {}
         layout = QVBoxLayout(self)
+        if info_text:
+            info = QLabel(info_text)
+            info.setWordWrap(True)
+            layout.addWidget(info)
         form = QFormLayout()
         self.inputs: Dict[str, QDoubleSpinBox] = {}
 
         for name, value in fields.items():
-            spin = QDoubleSpinBox()
+            spin = CompactDoubleSpinBox()
             spin.setRange(-1_000_000, 1_000_000)
-            spin.setDecimals(4)
-            spin.setValue(float(value) if value is not None else 0.0)
+            spin.setSuggestedValue(value if value is not None else 0.0)
             if name == "edge_tol":
                 spin.setToolTip(
-                    "Controls how permissively neighbouring facets are linked before facet size, normals, and interfacet angles are calculated. "
-                    "Higher values keep more neighbour links; lower values keep fewer."
+                    "Controls how permissively local tangent-plane neighbour links are retained before facet size, normals, and interfacet angles are calculated. "
+                    "Higher values keep more candidate links; lower values require links to be closer to the local facet spacing."
                 )
             self.inputs[name] = spin
             form.addRow(PARAM_DISPLAY_NAMES.get(name, name), spin)
@@ -1226,6 +1320,10 @@ class RuntimeParamDialog(QDialog):
             self.projection_group = QButtonGroup(self)
             center_box = QGroupBox("Projection sphere center")
             v = QVBoxLayout(center_box)
+            valid_projection_modes = {"between_eyes", "eye_center", "head_landmark_center"}
+            projection_center_default = str(projection_center_default)
+            if projection_center_default not in valid_projection_modes:
+                projection_center_default = "between_eyes"
             for i, (label, value) in enumerate([
                 ("Center between eyes", "between_eyes"),
                 ("Current eye center", "eye_center"),
@@ -1233,11 +1331,66 @@ class RuntimeParamDialog(QDialog):
             ]):
                 rb = QRadioButton(label)
                 rb.setProperty("value", value)
-                if value == "between_eyes":
+                if value == projection_center_default:
                     rb.setChecked(True)
                 self.projection_group.addButton(rb, i)
                 v.addWidget(rb)
             form.addRow(center_box)
+
+        self.lattice_combo = None
+        if show_lattice:
+            self.lattice_combo = QComboBox()
+            self.lattice_combo.addItem("Hexagonal", "hexagonal")
+            self.lattice_combo.addItem("Square", "square")
+            default_index = self.lattice_combo.findData(str(lattice_default).lower())
+            self.lattice_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+            self.lattice_combo.setToolTip(
+                "Sampling lattice used for Snyder's eye parameter and sampling frequency. "
+                "The local anatomical acuity estimate (acuity_cpd) is calculated independently from the interommatidial angle."
+            )
+            form.addRow("Sampling lattice", self.lattice_combo)
+
+        self.normal_method_combo = None
+        if show_normal_method:
+            self.normal_method_combo = QComboBox()
+            normal_options = [
+                ("Original CV3D", "original", None),
+                ("Envelope 1×", "envelope", 1.0),
+                ("Envelope 1.25×", "envelope", 1.25),
+                ("Envelope 1.5×", "envelope", 1.5),
+                ("Envelope 2×", "envelope", 2.0),
+            ]
+            for label, method, factor in normal_options:
+                self.normal_method_combo.addItem(label, {"method": method, "factor": factor})
+
+            wanted_method = str(normal_method_default or "envelope").strip().lower()
+            try:
+                wanted_factor = float(normal_envelope_factor_default)
+            except Exception:
+                wanted_factor = 1.25
+            wanted_index = -1
+            for i in range(self.normal_method_combo.count()):
+                data = self.normal_method_combo.itemData(i) or {}
+                if str(data.get("method", "")) != wanted_method:
+                    continue
+                if wanted_method == "original":
+                    wanted_index = i
+                    break
+                factor = data.get("factor")
+                if factor is not None and abs(float(factor) - wanted_factor) < 1e-9:
+                    wanted_index = i
+                    break
+            if wanted_index < 0:
+                wanted_index = 2  # Envelope 1.25×
+            self.normal_method_combo.setCurrentIndex(wanted_index)
+            self.normal_method_combo.setToolTip(
+                "Facet-normal estimator used for inter-facet angles and downstream optical metrics. "
+                "Original CV3D uses the focal/neighbour-triangle estimator with subsequent neighbour-normal averaging. "
+                "Envelope methods reconstruct a continuous facet-centre envelope, regularise its vertices, and estimate each normal "
+                "from area- and distance-weighted nearby envelope-face normals. The multiplier scales the Gaussian weighting width "
+                "relative to local facet spacing. Envelope methods do not apply subsequent neighbour-normal averaging."
+            )
+            form.addRow("Facet-normal method", self.normal_method_combo)
 
         self.update_default = QCheckBox("Update default after successful run")
         self.update_default.setChecked(True)
@@ -1261,6 +1414,217 @@ class RuntimeParamDialog(QDialog):
         if self.projection_group:
             button = self.projection_group.checkedButton()
             self.values["projection_center_mode"] = button.property("value")
+        if self.lattice_combo:
+            self.values["lattice"] = self.lattice_combo.currentData()
+        if self.normal_method_combo:
+            data = self.normal_method_combo.currentData() or {}
+            self.values["normal_method"] = str(data.get("method", "envelope"))
+            self.values["normal_envelope_factor"] = data.get("factor")
+        super().accept()
+
+
+class PlotOptionsDialog(QDialog):
+    """Collect all user-selectable QC plot inputs in one dialog."""
+
+    def __init__(
+        self,
+        title: str,
+        parent=None,
+        *,
+        metric_choices: Optional[List[tuple[str, str]]] = None,
+        show_normal_length: bool = False,
+        normal_length_default: float = 5.0,
+        open_rgl_default: bool = True,
+        facet_sphere_scale_default: float = 2.0,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.values: Dict[str, Any] = {}
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.metric_combo = None
+        self.metric_choices = metric_choices or []
+        if self.metric_choices:
+            self.metric_combo = QComboBox()
+            for col, label in self.metric_choices:
+                self.metric_combo.addItem(label, col)
+            form.addRow("Value", self.metric_combo)
+
+        self.normal_length_spin = None
+        if show_normal_length:
+            self.normal_length_spin = CompactDoubleSpinBox()
+            self.normal_length_spin.setRange(0.0, 1_000_000.0)
+            self.normal_length_spin.setSuggestedValue(normal_length_default)
+            self.normal_length_spin.setToolTip("Normal-vector length as a multiple of facet size.")
+            form.addRow("Normal length × facet size", self.normal_length_spin)
+
+        self.open_rgl = QCheckBox("Open interactive 3D view")
+        self.open_rgl.setChecked(bool(open_rgl_default))
+        form.addRow(self.open_rgl)
+
+        self.facet_sphere_scale = CompactDoubleSpinBox()
+        self.facet_sphere_scale.setRange(0.0, 1000.0)
+        self.facet_sphere_scale.setSuggestedValue(facet_sphere_scale_default)
+        self.facet_sphere_scale.setToolTip(
+            "Facet-sphere diameter scale. 1 = measured facet diameter (dataset estimate used where unavailable); "
+            "2 = twice that diameter; 0 = the legacy fixed marker size."
+        )
+        self.facet_sphere_scale.setEnabled(self.open_rgl.isChecked())
+        self.open_rgl.toggled.connect(self.facet_sphere_scale.setEnabled)
+        form.addRow("Facet-sphere diameter scale", self.facet_sphere_scale)
+
+        layout.addLayout(form)
+
+        note = QLabel(
+            "Facet-sphere scaling applies to the interactive 3D view. "
+            "A value of 0 reproduces the previous fixed marker size."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QHBoxLayout()
+        run = QPushButton("Plot")
+        cancel = QPushButton("Cancel")
+        run.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(run)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+    def accept(self):
+        open_rgl = self.open_rgl.isChecked()
+        self.values = {
+            "open_rgl_window": open_rgl,
+            "facet_sphere_scale": float(self.facet_sphere_scale.value()) if open_rgl else 0.0,
+        }
+        if self.metric_combo is not None:
+            idx = self.metric_combo.currentIndex()
+            self.values["selected_metric_col"] = str(self.metric_combo.currentData() or "")
+            self.values["selected_metric_label"] = str(self.metric_combo.currentText() or "")
+        if self.normal_length_spin is not None:
+            self.values["normal_length_facet_size_factor"] = float(self.normal_length_spin.value())
+        super().accept()
+
+
+class NormalPlotOptionsDialog(QDialog):
+    """Collect the normal-specific display inputs after Normals is selected."""
+
+    def __init__(
+        self,
+        title: str,
+        parent=None,
+        *,
+        normal_length_default: float = 5.0,
+        show_normals_default: bool = True,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.values: Dict[str, Any] = {}
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.normal_length_spin = CompactDoubleSpinBox()
+        self.normal_length_spin.setRange(0.0, 1_000_000.0)
+        self.normal_length_spin.setSuggestedValue(normal_length_default)
+        self.normal_length_spin.setToolTip("Normal-vector length as a multiple of facet size.")
+        form.addRow("Normal length × facet size", self.normal_length_spin)
+
+        self.show_normals = QCheckBox("Show normal vectors")
+        self.show_normals.setChecked(bool(show_normals_default))
+        self.show_normals.setToolTip(
+            "If unchecked, the plot keeps the direction-coloured facet points/spheres but omits the normal vectors."
+        )
+        self.show_normals.toggled.connect(self.normal_length_spin.setEnabled)
+        form.addRow(self.show_normals)
+
+        layout.addLayout(form)
+
+        note = QLabel("Facet colours still encode normal direction when the vectors are hidden.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QHBoxLayout()
+        run = QPushButton("Plot")
+        cancel = QPushButton("Cancel")
+        run.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(run)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+    def accept(self):
+        self.values = {
+            "normal_length_facet_size_factor": float(self.normal_length_spin.value()),
+            "show_normals": bool(self.show_normals.isChecked()),
+        }
+        super().accept()
+
+
+class CreateDatasetDialog(QDialog):
+    """Collect the raw-folder and source metadata in one dataset-creation dialog."""
+
+    def __init__(self, initial_folder: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Create CV3D dataset")
+        self.values: Dict[str, Any] = {}
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        folder_row = QHBoxLayout()
+        self.folder_edit = QLineEdit(str(initial_folder or ""))
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self.browse_folder)
+        folder_row.addWidget(self.folder_edit, 1)
+        folder_row.addWidget(browse)
+        folder_widget = QWidget()
+        folder_widget.setLayout(folder_row)
+        form.addRow("Raw/source folder", folder_widget)
+
+        self.source_type_combo = QComboBox()
+        for value in ["image_volume", "stl_from_3d_scanner", "stl_from_web", "stl_external_other"]:
+            self.source_type_combo.addItem(value, value)
+        form.addRow("Source type", self.source_type_combo)
+
+        self.notes_edit = QTextEdit()
+        self.notes_edit.setPlaceholderText("Optional source-data notes")
+        self.notes_edit.setMinimumHeight(90)
+        form.addRow("Source notes", self.notes_edit)
+
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        create = QPushButton("Create")
+        cancel = QPushButton("Cancel")
+        create.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(create)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+    def browse_folder(self):
+        start = self.folder_edit.text().strip() or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "Select raw dataset/source folder", start)
+        if folder:
+            self.folder_edit.setText(folder)
+
+    def accept(self):
+        raw_folder = self.folder_edit.text().strip()
+        if not raw_folder:
+            QMessageBox.warning(self, "Raw/source folder missing", "Select a raw/source folder first.")
+            return
+        path = Path(raw_folder)
+        if not path.exists() or not path.is_dir():
+            QMessageBox.warning(self, "Invalid raw/source folder", "The selected raw/source folder does not exist.")
+            return
+        self.values = {
+            "raw_folder": str(path),
+            "source_type": str(self.source_type_combo.currentData()),
+            "source_notes": self.notes_edit.toPlainText(),
+        }
         super().accept()
 
 
@@ -1311,21 +1675,19 @@ class LocalHeightThresholdDialog(QDialog):
 
         form = QFormLayout()
 
-        self.min_threshold_spin = QDoubleSpinBox()
+        self.min_threshold_spin = CompactDoubleSpinBox()
         self.min_threshold_spin.setRange(-1_000_000, 1_000_000)
-        self.min_threshold_spin.setDecimals(6)
         form.addRow("minimum threshold for preview", self.min_threshold_spin)
 
-        self.max_threshold_spin = QDoubleSpinBox()
+        self.max_threshold_spin = CompactDoubleSpinBox()
         self.max_threshold_spin.setRange(-1_000_000, 1_000_000)
-        self.max_threshold_spin.setDecimals(6)
         form.addRow("maximum threshold for preview", self.max_threshold_spin)
 
         layout.addLayout(form)
 
         note = QLabel(
             "A viridis-coloured eye preview will be created before the final threshold is set. "
-            "For normalized input, defaults are 0 and 1. For raw input, defaults are 5 and 30."
+            "Both raw-derived and normalized contrast scales run from 0 to 1."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -1346,16 +1708,12 @@ class LocalHeightThresholdDialog(QDialog):
         return self.source_group.checkedButton().property("value")
 
     def apply_mode_defaults(self):
-        if self.current_mode() == "normalized_local_heights":
-            self.min_threshold_spin.setValue(0.0)
-            self.max_threshold_spin.setValue(1.0)
-        else:
-            self.min_threshold_spin.setValue(5.0)
-            self.max_threshold_spin.setValue(30.0)
+        self.min_threshold_spin.setSuggestedValue(0.0)
+        self.max_threshold_spin.setSuggestedValue(1.0)
 
     def accept(self):
         mode = self.current_mode()
-        column = "local_height_log_norm" if mode == "normalized_local_heights" else "local_height_log"
+        column = "local_height_norm_contrast" if mode == "normalized_local_heights" else "local_height_contrast"
 
         min_threshold = self.min_threshold_spin.value()
         max_threshold = self.max_threshold_spin.value()
@@ -1395,13 +1753,12 @@ class FinalThresholdDialog(QDialog):
         layout.addWidget(info)
 
         form = QFormLayout()
-        self.threshold_spin = QDoubleSpinBox()
-        self.threshold_spin.setRange(-1_000_000, 1_000_000)
-        self.threshold_spin.setDecimals(6)
+        self.threshold_spin = CompactDoubleSpinBox()
+        self.threshold_spin.setRange(float(min_threshold), float(max_threshold))
 
         if suggested_threshold is None:
             suggested_threshold = (float(min_threshold) + float(max_threshold)) / 2
-        self.threshold_spin.setValue(float(suggested_threshold))
+        self.threshold_spin.setSuggestedValue(suggested_threshold)
 
         form.addRow("final local-height threshold", self.threshold_spin)
 
@@ -1412,7 +1769,7 @@ class FinalThresholdDialog(QDialog):
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
-        run = QPushButton("Run thresholding")
+        run = QPushButton("Threshold")
         cancel = QPushButton("Cancel")
         run.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
@@ -1454,22 +1811,19 @@ class FacetCandidateCondensationDialog(QDialog):
 
         form = QFormLayout()
 
-        self.neighbour_radius_spin = QDoubleSpinBox()
+        self.neighbour_radius_spin = CompactDoubleSpinBox()
         self.neighbour_radius_spin.setRange(0.000001, 1_000_000)
-        self.neighbour_radius_spin.setDecimals(6)
-        self.neighbour_radius_spin.setValue(float(suggested.get("neighbour_radius", facet_size_estimate * 0.5)))
+        self.neighbour_radius_spin.setSuggestedValue(suggested.get("neighbour_radius", facet_size_estimate * 0.5))
         form.addRow("neighbour radius", self.neighbour_radius_spin)
 
-        self.merge_radius_spin = QDoubleSpinBox()
+        self.merge_radius_spin = CompactDoubleSpinBox()
         self.merge_radius_spin.setRange(0.000001, 1_000_000)
-        self.merge_radius_spin.setDecimals(6)
-        self.merge_radius_spin.setValue(float(suggested.get("merge_radius", facet_size_estimate * 0.3)))
+        self.merge_radius_spin.setSuggestedValue(suggested.get("merge_radius", facet_size_estimate * 0.3))
         form.addRow("merge radius", self.merge_radius_spin)
 
-        self.weight_exponent_spin = QDoubleSpinBox()
+        self.weight_exponent_spin = CompactDoubleSpinBox()
         self.weight_exponent_spin.setRange(0.0, 20.0)
-        self.weight_exponent_spin.setDecimals(3)
-        self.weight_exponent_spin.setValue(float(suggested.get("weight_exponent", 2.0)))
+        self.weight_exponent_spin.setSuggestedValue(suggested.get("weight_exponent", 2.0))
         form.addRow("height-weight exponent", self.weight_exponent_spin)
 
         self.max_iterations_spin = QSpinBox()
@@ -1477,10 +1831,9 @@ class FacetCandidateCondensationDialog(QDialog):
         self.max_iterations_spin.setValue(int(suggested.get("max_iterations", 8)))
         form.addRow("maximum iterations", self.max_iterations_spin)
 
-        self.step_size_spin = QDoubleSpinBox()
+        self.step_size_spin = CompactDoubleSpinBox()
         self.step_size_spin.setRange(0.000001, 1.0)
-        self.step_size_spin.setDecimals(3)
-        self.step_size_spin.setValue(float(suggested.get("step_size", 0.7)))
+        self.step_size_spin.setSuggestedValue(suggested.get("step_size", 0.7))
         form.addRow("step size", self.step_size_spin)
 
         self.min_cluster_size_spin = QSpinBox()
@@ -1515,7 +1868,7 @@ class FacetCandidateCondensationDialog(QDialog):
         layout.addWidget(note)
 
         buttons = QHBoxLayout()
-        run = QPushButton("Run condensation")
+        run = QPushButton("Condense")
         cancel = QPushButton("Cancel")
         run.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
@@ -1562,6 +1915,22 @@ class CV3DMainWindow(QMainWindow):
             QListWidgetItem(label, self.nav)
         self.nav.currentRowChanged.connect(self.change_page)
 
+        self.process_wait_label = QLabel("Waiting for process…")
+        self.process_wait_label.setWordWrap(True)
+        self.process_wait_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.process_wait_label.setStyleSheet(
+            "font-weight: 600; padding: 8px; border: 1px solid #b8b8b8; border-radius: 4px;"
+        )
+        self.process_wait_label.hide()
+
+        left_widget = QWidget()
+        left_widget.setFixedWidth(180)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        left_layout.addWidget(self.nav, 1)
+        left_layout.addWidget(self.process_wait_label, 0)
+
         self.dataset_selector = QComboBox()
         self.dataset_selector.setMinimumWidth(220)
         self.dataset_selector.addItem("No project/dataset loaded", None)
@@ -1600,11 +1969,24 @@ class CV3DMainWindow(QMainWindow):
         right_panel.addLayout(top_bar)
         right_panel.addWidget(self.pages, 1)
 
-        root.addWidget(self.nav)
+        root.addWidget(left_widget)
         root.addWidget(right_widget)
         root.addStretch(1)
         self.setCentralWidget(central)
         self.nav.setCurrentRow(0)
+
+    def set_waiting_for_process(self, waiting: bool) -> None:
+        """Show a visible status immediately before a blocking external process."""
+        self.process_wait_label.setVisible(bool(waiting))
+        QApplication.processEvents()
+
+    def run_blocking_process(self, *args, **kwargs):
+        """Run an external process while making the UI's blocking state explicit."""
+        self.set_waiting_for_process(True)
+        try:
+            return subprocess.run(*args, **kwargs)
+        finally:
+            self.set_waiting_for_process(False)
 
     # ---------- UI builders ----------
 
@@ -1691,11 +2073,11 @@ class CV3DMainWindow(QMainWindow):
 
         row = QHBoxLayout()
 
-        run_real = QPushButton("Launch ImageJ/Fiji preprocessing")
+        run_real = QPushButton("Preprocess image volume")
         run_real.clicked.connect(self.launch_imagej_preprocessing)
         row.addWidget(run_real)
 
-        run_mesh = QPushButton("Launch ImageJ/Fiji STL extraction")
+        run_mesh = QPushButton("Extract STL meshes")
         run_mesh.clicked.connect(self.launch_imagej_mesh_extraction)
         row.addWidget(run_mesh)
 
@@ -1717,7 +2099,7 @@ class CV3DMainWindow(QMainWindow):
             form = QFormLayout(box)
             label = QLabel("No dataset loaded.")
             notes = QTextEdit()
-            notes.setPlaceholderText("External STL notes: free user text")
+            notes.setPlaceholderText("External STL notes (coordinates are assumed to be in µm)")
             browse = QPushButton(f"Browse and copy external STL: {eye}")
             browse.clicked.connect(lambda _, e=eye, n=notes: self.copy_external_stl(e, n.toPlainText()))
             form.addRow("Status", label)
@@ -1757,12 +2139,12 @@ class CV3DMainWindow(QMainWindow):
             v = QVBoxLayout(eye_box)
 
             button_specs = [
-                ("02_blender_cornea_extraction", "Launch Blender cornea extraction", self.launch_blender_cornea_extraction),
-                ("03a_local_height_calculation", "Launch R local height calculation", self.launch_r_03a_local_heights),
+                ("02_blender_cornea_extraction", "Extract cornea", self.launch_blender_cornea_extraction),
+                ("03a_local_height_calculation", "Calculate local heights", self.launch_r_03a_local_heights),
                 ("03a2_local_height_normalization", "Normalize local heights (optional)", self.launch_r_03a2_normalize_local_heights),
-                ("03b_local_height_thresholding", "Run local-height thresholding", self.launch_r_03b_local_height_thresholding),
-                ("03c_facet_candidate_condensation", "Run facet candidate condensation", self.launch_r_03c_facet_candidate_condensation),
-                ("04_blender_facet_check_landmarking", "Launch Blender facet position checking", self.launch_blender_facet_position_checking),
+                ("03b_local_height_thresholding", "Threshold local heights", self.launch_r_03b_local_height_thresholding),
+                ("03c_facet_candidate_condensation", "Condense facet candidates", self.launch_r_03c_facet_candidate_condensation),
+                ("04_blender_facet_check_landmarking", "Check facet positions", self.launch_blender_facet_position_checking),
             ]
             for step, text, func in button_specs:
                 label = QLabel(f"{STEP_LABELS[step]}: ○ not started")
@@ -1822,7 +2204,7 @@ class CV3DMainWindow(QMainWindow):
         specimen_box = QGroupBox("Specimen-level workflow")
         specimen_layout = QVBoxLayout(specimen_box)
         self.head_landmark_status_label = QLabel(f"{STEP_LABELS['05_blender_head_landmarking']}: ○ not started")
-        self.head_landmark_button = QPushButton("Launch Blender head landmarking")
+        self.head_landmark_button = QPushButton("Set head landmarks")
         self.head_landmark_button.clicked.connect(self.launch_blender_head_landmarking)
         specimen_layout.addWidget(self.head_landmark_status_label)
         specimen_layout.addWidget(self.head_landmark_button)
@@ -1889,9 +2271,9 @@ class CV3DMainWindow(QMainWindow):
         self.r_analysis_plot_buttons: Dict[str, Dict[str, QPushButton]] = {eye: {} for eye in EYES}
 
         analysis_specs = [
-            ("05a_optical_metrics", "Run 05A optical metrics", self.launch_r_05a_optical_metrics),
-            ("05b_global_coordinate_rotation", "Run 05B global coordinate rotation", self.launch_r_05b_global_coordinate_rotation),
-            ("05c_corneal_projections", "Run 05C corneal projections", self.launch_r_05c_corneal_projections),
+            ("05a_optical_metrics", "05A · Optical metrics", self.launch_r_05a_optical_metrics),
+            ("05b_global_coordinate_rotation", "05B · Align coordinates", self.launch_r_05b_global_coordinate_rotation),
+            ("05c_corneal_projections", "05C · Corneal projections", self.launch_r_05c_corneal_projections),
         ]
 
         for col, eye in enumerate(EYES):
@@ -1901,7 +2283,7 @@ class CV3DMainWindow(QMainWindow):
             for step, button_text, func in analysis_specs:
                 label = QLabel(f"{STEP_LABELS[step]}: ○ not started")
                 label.setWordWrap(True)
-                btn = QPushButton(f"{button_text}: {eye}")
+                btn = QPushButton(button_text)
                 btn.clicked.connect(lambda _, e=eye, f=func: f(e))
                 reason_label = QLabel("")
                 reason_label.setWordWrap(True)
@@ -1928,17 +2310,14 @@ class CV3DMainWindow(QMainWindow):
             plot_header_05a.setStyleSheet("font-weight: 600; margin-top: 2px;")
             v.addWidget(plot_header_05a)
 
-            optics_plot_btn = QPushButton(f"Plot 05A optic parameters (PNG + optional rgl): {eye}")
+            optics_plot_btn = QPushButton("Optics overview")
+            optics_plot_btn.setToolTip("05A optical-metric overview (PNG; optional interactive rgl).")
             optics_plot_btn.clicked.connect(lambda _, e=eye: self.plot_05a_outputs(e, "optics"))
             self.r_analysis_plot_buttons[eye]["optics"] = optics_plot_btn
             v.addWidget(optics_plot_btn)
 
-            normals_plot_btn = QPushButton(f"Plot 05A facet normals (PNG + optional rgl): {eye}")
-            normals_plot_btn.clicked.connect(lambda _, e=eye: self.plot_05a_outputs(e, "normals"))
-            self.r_analysis_plot_buttons[eye]["normals"] = normals_plot_btn
-            v.addWidget(normals_plot_btn)
-
-            labelled_metric_btn = QPushButton(f"Plot selected 05A value + facet labels (PNG + optional rgl): {eye}")
+            labelled_metric_btn = QPushButton("Choose facet value")
+            labelled_metric_btn.setToolTip("Choose a 05A facet value or normal direction and create its QC plot.")
             labelled_metric_btn.clicked.connect(lambda _, e=eye: self.plot_05a_outputs(e, "labelled_metric"))
             self.r_analysis_plot_buttons[eye]["labelled_metric"] = labelled_metric_btn
             v.addWidget(labelled_metric_btn)
@@ -1947,7 +2326,8 @@ class CV3DMainWindow(QMainWindow):
             plot_header_05b.setStyleSheet("font-weight: 600; margin-top: 6px;")
             v.addWidget(plot_header_05b)
 
-            align_qc_btn = QPushButton(f"Plot 05B global-alignment QC (PNG + optional rgl): {eye}")
+            align_qc_btn = QPushButton("Alignment")
+            align_qc_btn.setToolTip("05B global-alignment QC (PNG; optional interactive rgl).")
             align_qc_btn.clicked.connect(lambda _, e=eye: self.plot_05b_qc_outputs(e))
             self.r_analysis_plot_buttons[eye]["05b_qc"] = align_qc_btn
             v.addWidget(align_qc_btn)
@@ -1956,7 +2336,8 @@ class CV3DMainWindow(QMainWindow):
             plot_header_05c.setStyleSheet("font-weight: 600; margin-top: 6px;")
             v.addWidget(plot_header_05c)
 
-            projection_qc_btn = QPushButton(f"Plot 05C corneal projection QC (PNGs + optional rgl): {eye}")
+            projection_qc_btn = QPushButton("Corneal projection")
+            projection_qc_btn.setToolTip("05C corneal-projection QC (PNGs; optional interactive rgl).")
             projection_qc_btn.clicked.connect(lambda _, e=eye: self.plot_05c_qc_outputs(e))
             self.r_analysis_plot_buttons[eye]["05c_qc"] = projection_qc_btn
             v.addWidget(projection_qc_btn)
@@ -1968,9 +2349,9 @@ class CV3DMainWindow(QMainWindow):
 
         combined_box = QGroupBox("Combined two-eye QC plots")
         combined_layout = QVBoxLayout(combined_box)
-        self.r_analysis_combined_05b_btn = QPushButton("Plot 05B global-alignment QC: both eyes")
+        self.r_analysis_combined_05b_btn = QPushButton("Alignment · both eyes")
         self.r_analysis_combined_05b_btn.clicked.connect(lambda: self.plot_05b_qc_outputs(self.preferred_eye_for_combined_qc(), combined=True))
-        self.r_analysis_combined_05c_btn = QPushButton("Plot 05C corneal-projection QC: both eyes")
+        self.r_analysis_combined_05c_btn = QPushButton("Corneal projection · both eyes")
         self.r_analysis_combined_05c_btn.clicked.connect(lambda: self.plot_05c_qc_outputs(self.preferred_eye_for_combined_qc(), combined=True))
         combined_layout.addWidget(self.r_analysis_combined_05b_btn)
         combined_layout.addWidget(self.r_analysis_combined_05c_btn)
@@ -2072,7 +2453,7 @@ class CV3DMainWindow(QMainWindow):
         self.report_include_cp_plots.setChecked(True)
         self.report_include_optic_barplots = QCheckBox("Include 05A optic-parameter summaries and distributions")
         self.report_include_optic_barplots.setChecked(True)
-        self.report_include_downstream_examples = QCheckBox("Include additional latitude/longitude maps for optic parameters")
+        self.report_include_downstream_examples = QCheckBox("Include additional elevation/azimuth maps for optic parameters")
         self.report_include_downstream_examples.setChecked(True)
         self.report_create_fresh_rgl_snapshots = QCheckBox("Regenerate 05C rgl snapshot PNGs for the report")
         self.report_create_fresh_rgl_snapshots.setChecked(True)
@@ -2715,7 +3096,7 @@ class CV3DMainWindow(QMainWindow):
             for step in STEP_ORDER:
                 # Some future workflow steps still exist in the status/config
                 # schema, but are intentionally hidden until their real
-                # implementation replaces the old dummy placeholders.
+                # implementation replaces the legacy placeholders.
                 if step not in self.workflow_labels.get(eye, {}):
                     continue
 
@@ -2956,7 +3337,6 @@ class CV3DMainWindow(QMainWindow):
             qc05b_runner = self.resolve_r_analysis_runner("r_step05b_qc_plot_script_path")
             qc05c_runner = self.resolve_r_analysis_runner("r_step05c_qc_plot_script_path")
             optics_btn = getattr(self, "r_analysis_plot_buttons", {}).get(eye, {}).get("optics")
-            normals_btn = getattr(self, "r_analysis_plot_buttons", {}).get(eye, {}).get("normals")
             labelled_btn = getattr(self, "r_analysis_plot_buttons", {}).get(eye, {}).get("labelled_metric")
             qc05b_btn = getattr(self, "r_analysis_plot_buttons", {}).get(eye, {}).get("05b_qc")
             qc05c_btn = getattr(self, "r_analysis_plot_buttons", {}).get(eye, {}).get("05c_qc")
@@ -2978,14 +3358,6 @@ class CV3DMainWindow(QMainWindow):
                     optics_btn.setToolTip("Run 05A first to create optic-parameter outputs.")
                 else:
                     optics_btn.setToolTip(f"Create optic-parameter inspection PNG(s) for {eye}.")
-            if normals_btn is not None:
-                normals_btn.setEnabled(bool(qc_runner is not None and normals_ready))
-                if qc_runner is None:
-                    normals_btn.setToolTip("05A QC plot runner not configured.")
-                elif not normals_ready:
-                    normals_btn.setToolTip("Run 05A first to create facet-normal outputs.")
-                else:
-                    normals_btn.setToolTip(f"Create facet-normal inspection PNG(s) for {eye}.")
             if labelled_btn is not None:
                 labelled_btn.setEnabled(bool(qc_runner is not None and plot_ready))
                 if qc_runner is None:
@@ -2993,7 +3365,7 @@ class CV3DMainWindow(QMainWindow):
                 elif not plot_ready:
                     labelled_btn.setToolTip("Run 05A first to create optic-parameter outputs.")
                 else:
-                    labelled_btn.setToolTip(f"Choose one 05A metric and create a labelled inspection PNG for {eye}.")
+                    labelled_btn.setToolTip(f"Choose one 05A facet value or normal direction and create its inspection plot for {eye}.")
             if qc05b_btn is not None:
                 qc05b_btn.setEnabled(bool(qc05b_runner is not None and qc05b_ready))
                 if qc05b_runner is None:
@@ -3137,7 +3509,7 @@ class CV3DMainWindow(QMainWindow):
                 folder_exists = (self.analysis_folder / export_folder).exists() if self.analysis_folder else False
                 abs_folder = self.analysis_folder / export_folder if self.analysis_folder else Path(export_folder)
                 lines.append(f"export_folder: {export_folder} | {abs_folder} | {'exists' if folder_exists else 'missing'}")
-            for key in ["analysis_ready_table", "eye_summary", "specimen_summary", "metadata_json", "export_manifest", "optic_barplots_png", "cp_latlon_png", "qc_pdf_report", "html_report", "zip_export"]:
+            for key in ["analysis_ready_table", "eye_summary", "specimen_summary", "metadata_json", "export_manifest", "optic_barplots_png", "cp_view_angles_png", "qc_pdf_report", "html_report", "zip_export"]:
                 info = out.get(key, {})
                 fn = info.get("file", "")
                 exists = (self.analysis_folder / fn).exists() if fn and self.analysis_folder else False
@@ -3314,7 +3686,7 @@ class CV3DMainWindow(QMainWindow):
             files["imagej_stl_available"] = False
 
     def launch_imagej_mesh_extraction(self) -> None:
-        """Launch the separate ImageJ/Fiji mesh extraction macro for head and/or eyes."""
+        """Launch ImageJ/Fiji mesh extraction for head and/or eyes."""
         if not self.config or not self.status or not self.analysis_folder:
             QMessageBox.warning(self, "No dataset", "Create or load a dataset first.")
             return
@@ -3366,7 +3738,6 @@ class CV3DMainWindow(QMainWindow):
 
         missing_inputs = []
         for target in targets:
-            cv_id = self.config["dataset_identity"]["cv_id"]
             if target == "head":
                 input_rel = f"01_{cv_id}_head.nrrd"
             else:
@@ -3384,15 +3755,21 @@ class CV3DMainWindow(QMainWindow):
             return
 
         expected_outputs = [f"{target}: {self.expected_mesh_output_for_target(target)}" for target in targets]
+        session_note = (
+            "All selected targets will run in one ImageJ/Fiji session.\n"
+            "The accepted threshold from each target will be suggested as the starting value for the next target.\n\n"
+            if len(targets) > 1 else
+            "ImageJ/Fiji will close automatically after this target is finished.\n\n"
+        )
         reply = QMessageBox.question(
             self,
             "Launch ImageJ/Fiji STL extraction",
-            "This will launch the separate interactive ImageJ/Fiji mesh extraction macro.\n\n"
-            "Targets will run one after another. Finish and close ImageJ/Fiji for each target before the next target starts.\n\n"
-            f"CV ID: {cv_id}\n"
-            f"Targets: {', '.join(targets)}\n"
-            f"Analysis folder: {self.analysis_folder}\n\n"
-            "Expected STL outputs:\n" + "\n".join(expected_outputs),
+            "This will launch the interactive ImageJ/Fiji mesh extraction workflow.\n\n"
+            + session_note
+            + f"CV ID: {cv_id}\n"
+            + f"Targets: {', '.join(targets)}\n"
+            + f"Analysis folder: {self.analysis_folder}\n\n"
+            + "Expected STL outputs:\n" + "\n".join(expected_outputs),
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -3403,26 +3780,71 @@ class CV3DMainWindow(QMainWindow):
         before = self.status["workflow_steps"]["01_imagej_preprocessing"].get("state", "not_started")
 
         for target in targets:
-            arg = (
-                f"mode=cv3d_mesh;"
-                f"analysis_folder={self.analysis_folder};"
-                f"cv_id={cv_id};"
-                f"target={target}"
+            append_log(
+                self.analysis_folder,
+                cv_id,
+                target if target in EYES else "",
+                "01_imagej_mesh_extraction",
+                "launch_imagej_mesh",
+                before,
+                "running",
+                "started",
+                f"ImageJ/Fiji STL extraction started for {target}."
             )
-            cmd = [str(imagej_exe), "-macro", str(macro_path), arg]
 
-            append_log(self.analysis_folder, cv_id, target if target in EYES else "", "01_imagej_mesh_extraction", "launch_imagej_mesh", before, "running", "started", " ".join(cmd))
+        batch_macro_path = None
+        try:
+            if len(targets) == 1:
+                target = targets[0]
+                arg = (
+                    f"mode=cv3d_mesh;"
+                    f"analysis_folder={self.analysis_folder};"
+                    f"cv_id={cv_id};"
+                    f"target={target};"
+                    f"quit_after=1"
+                )
+                cmd = [str(imagej_exe), "-macro", str(macro_path), arg]
+            else:
+                logs_dir = self.analysis_folder / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                batch_macro_path = logs_dir / f"_CV3D_{cv_id}_mesh_batch.ijm"
 
-            try:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder))
-                exit_code = result.returncode
-            except Exception as e:
-                all_ok = False
-                msg = f"{target}: could not launch ImageJ/Fiji: {e}"
-                messages.append(msg)
-                append_log(self.analysis_folder, cv_id, target if target in EYES else "", "01_imagej_mesh_extraction", "launch_imagej_mesh", before, "failed", "failed", msg)
-                break
+                macro_for_ij = str(macro_path).replace("\\", "/").replace('"', '\\"')
+                analysis_for_ij = str(self.analysis_folder).replace("\\", "/").replace('"', '\\"')
+                cv_for_ij = str(cv_id).replace('"', '\\"')
+                target_literals = ", ".join(f'"{str(t).replace(chr(34), "")}"' for t in targets)
 
+                batch_macro = (
+                    f'mesh_macro = "{macro_for_ij}";\n'
+                    f'analysis_folder = "{analysis_for_ij}";\n'
+                    f'cv_id = "{cv_for_ij}";\n'
+                    f'targets = newArray({target_literals});\n'
+                    'suggested_threshold = "";\n'
+                    'for (bi = 0; bi < targets.length; bi++) {\n'
+                    '    subarg = "mode=cv3d_mesh;analysis_folder=" + analysis_folder + ";cv_id=" + cv_id + ";target=" + targets[bi] + ";quit_after=0";\n'
+                    '    if (suggested_threshold != "") subarg = subarg + ";suggested_threshold=" + suggested_threshold;\n'
+                    '    suggested_threshold = call("ij.IJ.runMacroFile", mesh_macro, subarg);\n'
+                    '}\n'
+                    'run("Quit");\n'
+                )
+                batch_macro_path.write_text(batch_macro, encoding="utf-8")
+                cmd = [str(imagej_exe), "-macro", str(batch_macro_path)]
+
+            result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder))
+            exit_code = result.returncode
+
+        except Exception as e:
+            exit_code = -1
+            all_ok = False
+            messages.append(f"Could not launch ImageJ/Fiji: {e}")
+        finally:
+            if batch_macro_path is not None:
+                try:
+                    batch_macro_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        for target in targets:
             status_json = self.expected_mesh_status_for_target(target)
             imagej_status = "unknown"
             status_message = ""
@@ -3441,7 +3863,11 @@ class CV3DMainWindow(QMainWindow):
 
             if exit_code == 0 and imagej_status == "success" and output_exists:
                 msg = f"{target}: success — {output_rel}"
-                append_log(self.analysis_folder, cv_id, target if target in EYES else "", "01_imagej_mesh_extraction", "launch_imagej_mesh", before, "complete", "success", msg)
+                append_log(
+                    self.analysis_folder, cv_id, target if target in EYES else "",
+                    "01_imagej_mesh_extraction", "launch_imagej_mesh", before,
+                    "complete", "success", msg
+                )
             else:
                 all_ok = False
                 msg = (
@@ -3450,11 +3876,13 @@ class CV3DMainWindow(QMainWindow):
                 )
                 if status_message:
                     msg += f"; {status_message}"
-                append_log(self.analysis_folder, cv_id, target if target in EYES else "", "01_imagej_mesh_extraction", "launch_imagej_mesh", before, "failed", "failed", msg)
+                append_log(
+                    self.analysis_folder, cv_id, target if target in EYES else "",
+                    "01_imagej_mesh_extraction", "launch_imagej_mesh", before,
+                    "failed", "failed", msg
+                )
             messages.append(msg)
 
-        # Keep this as part of source preparation: it enriches 01 ImageJ outputs rather than
-        # creating a separate downstream analysis step.
         s = self.status["workflow_steps"]["01_imagej_preprocessing"]
         if all_ok:
             s["state"] = "complete"
@@ -3577,7 +4005,7 @@ class CV3DMainWindow(QMainWindow):
         cmd = [str(imagej_exe), "-macro", str(macro_path), arg]
 
         try:
-            result = subprocess.run(cmd, cwd=str(raw_folder))
+            result = self.run_blocking_process(cmd, cwd=str(raw_folder))
             exit_code = result.returncode
         except Exception as e:
             s["state"] = "failed"
@@ -3997,7 +4425,7 @@ class CV3DMainWindow(QMainWindow):
             cmd = [str(blender_exe), "--python", str(blender_script), "--", relative_task_argument(task_path, self.analysis_folder)]
 
         try:
-            result = subprocess.run(cmd, cwd=str(self.analysis_folder))
+            result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder))
             exit_code = result.returncode
         except Exception as e:
             self.set_eye_step_state("02_blender_cornea_extraction", eye, "failed", [f"Could not launch Blender: {e}"])
@@ -4097,7 +4525,7 @@ class CV3DMainWindow(QMainWindow):
             self.nav.setCurrentRow(6)
             return False, ""
 
-        result = subprocess.run(
+        result = self.run_blocking_process(
             [str(rscript), "-e", expression],
             cwd=str(self.project_folder or Path.home()),
             stdout=subprocess.PIPE,
@@ -4306,11 +4734,11 @@ class CV3DMainWindow(QMainWindow):
             "raw_rel": raw_rel,
             "raw_abs": raw_path,
             "raw_available": raw_available,
-            "raw_column": "local_height_log",
+            "raw_column": "local_height_contrast",
             "norm_rel": norm_rel,
             "norm_abs": norm_path,
             "norm_available": norm_available,
-            "norm_column": "local_height_log_norm",
+            "norm_column": "local_height_norm_contrast",
         }
 
     def create_r_step03b_preview_task(self, eye: str, input_mode: str, height_column: str, min_threshold: float, max_threshold: float) -> Path:
@@ -4386,12 +4814,15 @@ class CV3DMainWindow(QMainWindow):
 
         launch_diag_path = self.analysis_folder / eye_log_rel_path(eye, f"03BPREV_{cv_id}_{eye}_R_launch_command.txt")
         cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
-        write_text(launch_path, "Command:\\n" + " ".join(f'\\"{part}\\"' for part in cmd) + "\\n\\n" + f"Working directory:\\n{self.analysis_folder}\\n")
-
 
         try:
+            write_text(
+                launch_diag_path,
+                "Command:\n" + " ".join(f'"{part}"' for part in cmd) + "\n\n"
+                f"Working directory:\n{self.analysis_folder}\n"
+            )
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -4524,8 +4955,8 @@ class CV3DMainWindow(QMainWindow):
 
         dlg = LocalHeightThresholdDialog(
             "03B Local-height thresholding — preview setup",
-            raw_label=f"{opts['raw_rel']}  |  column: local_height_log",
-            normalized_label=f"{opts['norm_rel']}  |  column: local_height_log_norm",
+            raw_label=f"{opts['raw_rel']}  |  column: local_height_contrast",
+            normalized_label=f"{opts['norm_rel']}  |  column: local_height_norm_contrast",
             normalized_available=opts["norm_available"],
             default_normalized=opts["norm_available"],
             parent=self,
@@ -4552,8 +4983,14 @@ class CV3DMainWindow(QMainWindow):
             # open automatically before the final-threshold prompt.
             self.open_local_path(preview_plot_path, "03B local-height preview plot")
 
-        mode_default = 0.5 if preview_params["input_mode"] == "normalized_local_heights" else 15.0
+        mode_default = 0.5
         suggested_final = self.get_suggested_value(eye, "local_height_threshold", defaults.get("local_height_threshold", mode_default))
+        try:
+            suggested_final = float(suggested_final)
+        except (TypeError, ValueError):
+            suggested_final = mode_default
+        if not (float(preview_params["min_threshold"]) <= suggested_final <= float(preview_params["max_threshold"])):
+            suggested_final = mode_default
 
         final_dlg = FinalThresholdDialog(
             "03B Local-height thresholding — final threshold",
@@ -4598,7 +5035,8 @@ class CV3DMainWindow(QMainWindow):
             f"Preview max threshold: {task.get('max_threshold')}\n"
             f"Final threshold: {task.get('local_height_threshold')}\n"
             f"Output CSV: {task.get('output_local_height_thresholded')}\n\n"
-            "The GUI will wait until Rscript finishes.",
+            "After successful thresholding, CV3D will automatically save the thresholded local-height 3D PNG and open the interactive 3D plot.\n"
+            "The interactive plot remains open until you close it.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -4629,7 +5067,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -4661,7 +5099,8 @@ class CV3DMainWindow(QMainWindow):
                 r_status = "unreadable_status_json"
                 status_message = str(e)
 
-        if exit_code == 0 and r_status == "success" and output_thresholded.exists():
+        thresholding_succeeded = exit_code == 0 and r_status == "success" and output_thresholded.exists()
+        if thresholding_succeeded:
             messages = [f"R Step 03B finished with status: {r_status}."]
             if thresholded_count is not None:
                 messages.append(f"Thresholded point count: {thresholded_count}.")
@@ -4710,7 +5149,10 @@ class CV3DMainWindow(QMainWindow):
         self.validate_current_workflow_outputs(save_changes=True)
         self.refresh_all()
 
-    def plot_thresholded_local_heights_3d(self, eye: str) -> None:
+        if thresholding_succeeded:
+            self.plot_thresholded_local_heights_3d(eye, automatic=True)
+
+    def plot_thresholded_local_heights_3d(self, eye: str, automatic: bool = False) -> None:
         """Create a 3D PNG preview of 03B thresholded points on the eye."""
         if not self.ensure_eye_and_dataset(eye):
             return
@@ -4762,12 +5204,18 @@ class CV3DMainWindow(QMainWindow):
         if task03b_path.exists():
             task03b = read_json(task03b_path)
             input_rel = task03b.get("input_local_heights") or files["local_heights_file"]
-            height_column = task03b.get("height_column") or "local_height_log"
+            height_column = task03b.get("height_column") or "local_height_contrast"
+            height_column = {
+                "local_height_log": "local_height_contrast",
+                "local_height_exp10": "local_height_contrast",
+                "local_height_log_norm": "local_height_norm_contrast",
+                "local_height_norm_exp10": "local_height_norm_contrast",
+            }.get(height_column, height_column)
             input_mode = task03b.get("input_mode") or "raw_local_heights"
             threshold = task03b.get("local_height_threshold")
         else:
             input_rel = files["local_heights_file"]
-            height_column = "local_height_log"
+            height_column = "local_height_contrast"
             input_mode = "raw_local_heights"
             threshold = None
 
@@ -4776,17 +5224,24 @@ class CV3DMainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing 03B source table", f"The source table used for 03B is missing:\n\n{input_rel}")
             return
 
-        open_reply = QMessageBox.question(
-            self,
-            "Open interactive rgl window?",
-            "Create the PNG preview only, or also keep an interactive rgl window open for inspection?\n\n"
-            "If you choose Yes, the GUI will wait until you close the rgl window.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No
-        )
-        if open_reply == QMessageBox.StandardButton.Cancel:
-            return
-        open_rgl_window = (open_reply == QMessageBox.StandardButton.Yes)
+        if automatic:
+            # Automatic post-threshold plotting is an inspection step: keep the
+            # interactive rgl window alive until the user closes it. The R runner
+            # owns that lifetime, so the blocking process call below intentionally
+            # waits while the window remains open.
+            open_rgl_window = True
+        else:
+            open_reply = QMessageBox.question(
+                self,
+                "Open interactive rgl window?",
+                "Create the PNG preview only, or also keep an interactive rgl window open for inspection?\n\n"
+                "If you choose Yes, the GUI will wait until you close the rgl window.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No
+            )
+            if open_reply == QMessageBox.StandardButton.Cancel:
+                return
+            open_rgl_window = (open_reply == QMessageBox.StandardButton.Yes)
 
         task_rel = eye_json_rel_path(eye, f"03BP_{cv_id}_{eye}_R_task.json")
         status_rel = eye_json_rel_path(eye, f"03BP_{cv_id}_{eye}_R_status.json")
@@ -4822,21 +5277,22 @@ class CV3DMainWindow(QMainWindow):
         task_path = self.analysis_folder / task_rel
         write_json(task_path, task)
 
-        reply = QMessageBox.question(
-            self,
-            "Create thresholded local-height 3D plot",
-            "This will create a PNG preview of the 03B thresholded points on the eye.\n\n"
-            f"CV ID: {cv_id}\n"
-            f"Eye: {eye}\n"
-            f"Source table: {input_rel}\n"
-            f"Thresholded table: {thresholded_rel}\n"
-            f"Output PNG: {plot_rel}\n"
-            f"Open interactive rgl window: {open_rgl_window}\n\n"
-            "The GUI will wait until Rscript finishes.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
-        )
-        if reply != QMessageBox.StandardButton.Ok:
-            return
+        if not automatic:
+            reply = QMessageBox.question(
+                self,
+                "Create thresholded local-height 3D plot",
+                "This will create a PNG preview of the 03B thresholded points on the eye.\n\n"
+                f"CV ID: {cv_id}\n"
+                f"Eye: {eye}\n"
+                f"Source table: {input_rel}\n"
+                f"Thresholded table: {thresholded_rel}\n"
+                f"Output PNG: {plot_rel}\n"
+                f"Open interactive rgl window: {open_rgl_window}\n\n"
+                "The GUI will wait until Rscript finishes.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+            )
+            if reply != QMessageBox.StandardButton.Ok:
+                return
 
         stdout_path = self.analysis_folder / stdout_rel
         stderr_path = self.analysis_folder / stderr_rel
@@ -4851,9 +5307,28 @@ class CV3DMainWindow(QMainWindow):
             f"Working directory:\n{self.analysis_folder}\n"
         )
 
+        if automatic:
+            try:
+                out = stdout_path.open("w", encoding="utf-8", errors="replace")
+                err = stderr_path.open("w", encoding="utf-8", errors="replace")
+                try:
+                    process = subprocess.Popen(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                finally:
+                    out.close()
+                    err.close()
+                if not hasattr(self, "_background_plot_processes"):
+                    self._background_plot_processes = []
+                self._background_plot_processes = [p for p in self._background_plot_processes if p.poll() is None]
+                self._background_plot_processes.append(process)
+                with launch_diag_path.open("a", encoding="utf-8") as f:
+                    f.write(f"\nBackground process ID:\n{process.pid}\n")
+            except Exception as e:
+                QMessageBox.warning(self, "R thresholded 3D plot launch failed", str(e))
+            return
+
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -4900,7 +5375,7 @@ class CV3DMainWindow(QMainWindow):
             )
 
 
-    def create_r_step03a_task(self, eye: str, search_diam: float) -> Path:
+    def create_r_step03a_task(self, eye: str, neighbourhood_radius: float) -> Path:
         cv_id = self.config["dataset_identity"]["cv_id"]
         files = self.config["eyes"][eye]["files"]
         task_rel = files["r_step03a_task_file"]
@@ -4928,7 +5403,7 @@ class CV3DMainWindow(QMainWindow):
             "stderr_file": eye_log_rel_path(eye, f"03A_{cv_id}_{eye}_R_stderr.log"),
             "stderr_file_abs": str(self.analysis_folder / eye_log_rel_path(eye, f"03A_{cv_id}_{eye}_R_stderr.log")),
             "facet_size_estimate": facet_size,
-            "local_height_search_diam": float(search_diam),
+            "local_height_neighbourhood_radius": float(neighbourhood_radius),
             "max_cores": max_cores,
             "invert_local_heights": False,
             "notes": "Created by CV3D Python controller for R Step 03A.",
@@ -4976,36 +5451,47 @@ class CV3DMainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Facet-size estimate missing",
-                "Step 03A needs a facet-size estimate before it can suggest a local-height search diameter.\n\n"
+                "Step 03A needs a facet-size estimate before it can suggest a local-height neighbourhood radius.\n\n"
                 f"{e}"
             )
             return
 
         defaults = self.config["parameters"]["dataset_defaults"]
-        default_factor = float(defaults.get("local_height_search_diam_factor", 3.0))
-        suggested_search_diam = self.get_suggested_value(
-            eye,
-            "local_height_search_diam",
-            facet_size * default_factor
-        )
+        if defaults.get("local_height_neighbourhood_radius_factor") is not None:
+            default_factor = float(defaults["local_height_neighbourhood_radius_factor"])
+        elif defaults.get("local_height_neighbourhood_half_width_factor") is not None:
+            default_factor = float(defaults["local_height_neighbourhood_half_width_factor"])
+        elif defaults.get("local_height_search_diam_factor") is not None:
+            default_factor = float(defaults["local_height_search_diam_factor"]) / 8.0
+        else:
+            default_factor = 0.5
 
-        search_diam, ok = QInputDialog.getDouble(
+        last_used = self.config["parameters"].get(f"{eye}_last_used", {})
+        if last_used.get("local_height_neighbourhood_radius") is not None:
+            suggested_radius = float(last_used["local_height_neighbourhood_radius"])
+        elif last_used.get("local_height_neighbourhood_half_width") is not None:
+            suggested_radius = float(last_used["local_height_neighbourhood_half_width"])
+        elif last_used.get("local_height_search_diam") is not None:
+            suggested_radius = float(last_used["local_height_search_diam"]) / 8.0
+        else:
+            suggested_radius = facet_size * default_factor
+
+        neighbourhood_radius, ok = get_compact_double(
             self,
-            "03A local-height search diameter",
-            "Local-height search diameter\n\n"
+            "03A local-height neighbourhood",
+            "Local-height spherical neighbourhood\n\n"
             f"Facet-size estimate: {facet_size:g}\n"
-            "Default suggestion: facet-size estimate × 3\n\n"
-            "Search diameter:",
-            float(suggested_search_diam),
+            "Default suggestion: facet-size estimate × 0.5\n\n"
+            "Neighbourhood radius:",
+            suggested_radius,
             0.000001,
             1_000_000.0,
-            6,
         )
         if not ok:
             return
 
         try:
-            task_path = self.create_r_step03a_task(eye, search_diam=float(search_diam))
+            task_path = self.create_r_step03a_task(eye, neighbourhood_radius=float(neighbourhood_radius))
         except Exception as e:
             QMessageBox.warning(
                 self,
@@ -5024,6 +5510,7 @@ class CV3DMainWindow(QMainWindow):
             f"Eye: {eye}\n"
             f"Input cornea STL: {files.get('cornea_stl_file')}\n"
             f"Facet size estimate: {task.get('facet_size_estimate')}\n"
+            f"Neighbourhood radius: {task.get('local_height_neighbourhood_radius')}\n"
             f"Max cores: {task.get('max_cores')}\n"
             f"R package: CV3D from {self.settings.get('r_github_repo', 'Pete-s-Lab/CV3D')}\n\n"
             "The GUI will wait until Rscript finishes.",
@@ -5057,7 +5544,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -5109,16 +5596,16 @@ class CV3DMainWindow(QMainWindow):
             self.set_eye_step_state("03a_local_height_calculation", eye, "failed", messages)
             append_log(self.analysis_folder, cv_id, eye, "03a_local_height_calculation", "launch_rscript", before, "failed", "failed", "; ".join(messages))
 
-        self.config["parameters"][f"{eye}_last_used"]["local_height_search_diam"] = float(search_diam)
+        self.config["parameters"][f"{eye}_last_used"]["local_height_neighbourhood_radius"] = float(neighbourhood_radius)
         if facet_size > 0:
-            self.config["parameters"]["dataset_defaults"]["local_height_search_diam_factor"] = float(search_diam) / facet_size
+            self.config["parameters"]["dataset_defaults"]["local_height_neighbourhood_radius_factor"] = float(neighbourhood_radius) / facet_size
 
         self.save_current_files()
         self.validate_current_workflow_outputs(save_changes=True)
         self.refresh_all()
 
 
-    def create_r_step03a2_task(self, eye: str, normalize_diam: float) -> Path:
+    def create_r_step03a2_task(self, eye: str, neighbourhood_radius: float) -> Path:
         cv_id = self.config["dataset_identity"]["cv_id"]
         files = self.config["eyes"][eye]["files"]
         task_rel = files["r_step03a2_task_file"]
@@ -5144,8 +5631,10 @@ class CV3DMainWindow(QMainWindow):
             "stderr_file": eye_log_rel_path(eye, f"03A2_{cv_id}_{eye}_R_stderr.log"),
             "stderr_file_abs": str(self.analysis_folder / eye_log_rel_path(eye, f"03A2_{cv_id}_{eye}_R_stderr.log")),
             "facet_size_estimate": facet_size,
-            "normalize_diam": normalize_diam,
+            "neighbourhood_radius": neighbourhood_radius,
             "column_to_normalize": "local_height",
+            "lower_quantile": 0.10,
+            "upper_quantile": 0.90,
             "max_cores": max_cores,
             "notes": "Created by CV3D Python controller for optional R Step 03A2 local-height normalization.",
         }
@@ -5185,21 +5674,25 @@ class CV3DMainWindow(QMainWindow):
 
         cv_id = self.config["dataset_identity"]["cv_id"]
         files = self.config["eyes"][eye]["files"]
-        defaults = self.config["parameters"].setdefault("dataset_defaults", {})
+        self.config["parameters"].setdefault("dataset_defaults", {})
         facet_size = self.read_facet_size_estimate_for_task()
-        suggested = defaults.get("local_height_normalization_diam") or facet_size
+        suggested = facet_size
 
         dlg = RuntimeParamDialog(
             "03A2 Optional local-height normalization",
-            {"normalize_diam": float(suggested)},
+            {"neighbourhood_radius": float(suggested)},
             self,
+            info_text=(
+                f"Default neighbourhood radius: facet-size estimate ({facet_size:g} µm). "
+                "Enter the neighbourhood radius to use for normalization."
+            ),
         )
         if dlg.exec() != QDialog.Accepted:
             return
-        normalize_diam = float(dlg.values["normalize_diam"])
+        neighbourhood_radius = float(dlg.values["neighbourhood_radius"])
 
         try:
-            task_path = self.create_r_step03a2_task(eye, normalize_diam)
+            task_path = self.create_r_step03a2_task(eye, neighbourhood_radius)
         except Exception as e:
             QMessageBox.warning(
                 self,
@@ -5218,7 +5711,7 @@ class CV3DMainWindow(QMainWindow):
             f"Eye: {eye}\n"
             f"Input raw local heights: {files.get('local_heights_file')}\n"
             f"Output normalized local heights: {files.get('local_heights_normalized_file')}\n"
-            f"Normalization diameter: {task.get('normalize_diam')}\n"
+            f"Normalization neighbourhood radius: {task.get('neighbourhood_radius')}\n"
             f"Max cores: {task.get('max_cores')}\n\n"
             "The mandatory downstream workflow still uses raw 03A output unless a later step explicitly chooses otherwise.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
@@ -5251,7 +5744,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -5286,8 +5779,8 @@ class CV3DMainWindow(QMainWindow):
                 messages.append(status_message)
             self.set_eye_step_state("03a2_local_height_normalization", eye, "complete", messages)
             if dlg.values.get("update_default"):
-                self.config["parameters"].setdefault("dataset_defaults", {})["local_height_normalization_diam"] = normalize_diam
-            self.config["parameters"].setdefault(f"{eye}_last_used", {})["local_height_normalization_diam"] = normalize_diam
+                self.config["parameters"].setdefault("dataset_defaults", {})["local_height_normalization_radius"] = neighbourhood_radius
+            self.config["parameters"].setdefault(f"{eye}_last_used", {})["local_height_normalization_radius"] = neighbourhood_radius
             append_log(self.analysis_folder, cv_id, eye, "03a2_local_height_normalization", "launch_rscript", before, "complete", "success", "; ".join(messages))
         else:
             messages = [
@@ -5337,24 +5830,12 @@ class CV3DMainWindow(QMainWindow):
         if not self.project_folder or self.registry is None:
             QMessageBox.warning(self, "No project", "Open or create a project folder first.")
             return
-        raw = QFileDialog.getExistingDirectory(self, "Select raw dataset/source folder", str(self.project_folder))
-        if not raw:
+        dlg = CreateDatasetDialog(str(self.project_folder), self)
+        if dlg.exec() != QDialog.Accepted:
             return
-        raw_folder = Path(raw)
-        source_type, ok = QInputDialog.getItem(
-            self, "Source type",
-            "Select source type",
-            ["image_volume", "stl_from_3d_scanner", "stl_from_web", "stl_external_other"],
-            0, False
-        )
-        if not ok:
-            return
-        source_notes, ok = QInputDialog.getMultiLineText(
-            self, "Raw-data / source notes",
-            "Optional free text describing source data:"
-        )
-        if not ok:
-            return
+        raw_folder = Path(dlg.values["raw_folder"])
+        source_type = str(dlg.values["source_type"])
+        source_notes = str(dlg.values["source_notes"])
 
         cv_id = next_cv_id(self.registry)
         analysis_folder = raw_folder / f"{cv_id}_CV3D"
@@ -5473,6 +5954,16 @@ class CV3DMainWindow(QMainWindow):
 
         for eye in EYES:
             files = self.config.setdefault("eyes", {}).setdefault(eye, {"present": True, "files": {}}).setdefault("files", {})
+            if "sensitivity_acuity_file" in files and "sampling_acuity_file" not in files:
+                files["sampling_acuity_file"] = files.pop("sensitivity_acuity_file")
+                changed = True
+            old_sampling = files.get("sampling_acuity_file")
+            new_sampling = eye_file_map(cv_id, eye).get("sampling_acuity_file")
+            if old_sampling and new_sampling and str(old_sampling).endswith("_sensitivity_acuity.csv") and old_sampling != new_sampling:
+                if self.analysis_folder:
+                    _move_existing_file_if_needed(self.analysis_folder, old_sampling, new_sampling)
+                files["sampling_acuity_file"] = new_sampling
+                changed = True
             for key, value in eye_file_map(cv_id, eye).items():
                 if key not in files:
                     files[key] = value
@@ -5522,8 +6013,11 @@ class CV3DMainWindow(QMainWindow):
             if old_value is None or old_value_num == 2.0:
                 container[sphere_key] = 15.0
                 changed = True
-        if defaults.get("projection_center_mode") in (None, "", "eye_center"):
+        if defaults.get("projection_center_mode") in (None, ""):
             defaults["projection_center_mode"] = "between_eyes"
+            changed = True
+        if defaults.get("local_height_neighbourhood_radius_factor") is None:
+            defaults["local_height_neighbourhood_radius_factor"] = 0.5
             changed = True
 
         return changed
@@ -5563,7 +6057,7 @@ class CV3DMainWindow(QMainWindow):
                 "facet_normals_file",
                 "facet_sizes_file",
                 "interfacet_angles_file",
-                "sensitivity_acuity_file",
+                "sampling_acuity_file",
                 "optical_summary_file",
             ],
             "05b_global_coordinate_rotation": [
@@ -5915,7 +6409,7 @@ class CV3DMainWindow(QMainWindow):
         s["messages"] = messages or []
         append_log(
             self.analysis_folder, self.config["dataset_identity"]["cv_id"], eye,
-            step, "dummy_run_or_update", before, state, "success", "; ".join(s["messages"])
+            step, "set_step_state", before, state, "success", "; ".join(s["messages"])
         )
 
     def mark_downstream_needs_rerun(self, step: str, eye: str) -> None:
@@ -5958,37 +6452,6 @@ class CV3DMainWindow(QMainWindow):
             rep["zip_export"]["symbol"] = "↻"
             rep["zip_export"]["outdated_export"] = True
 
-    # ---------- dummy step implementations ----------
-
-    def run_dummy_imagej(self) -> None:
-        if not self.config or not self.analysis_folder:
-            return
-        cv_id = self.config["dataset_identity"]["cv_id"]
-        if self.config["source_data"]["imagej_preprocessing_skipped"]:
-            QMessageBox.information(self, "Skipped", "ImageJ is skipped for STL-source datasets.")
-            return
-        write_text(self.analysis_folder / f"01_{cv_id}_head.nrrd", "DUMMY NRRD HEAD ROI\n")
-        write_csv(
-            self.analysis_folder / f"01_{cv_id}_facet_size_estimate.csv",
-            ["cv_id", "facet_size_estimate", "unit"],
-            [{"cv_id": cv_id, "facet_size_estimate": self.config["parameters"]["dataset_defaults"]["facet_size_estimate"], "unit": "um"}],
-        )
-        for eye in self.config["eye_inventory"]["active_eyes"]:
-            files = self.config["eyes"][eye]["files"]
-            write_text(self.analysis_folder / files["nrrd_file"], f"DUMMY NRRD {eye}\n")
-            write_text(self.analysis_folder / files["imagej_stl_file"], f"solid dummy_{eye}\nendsolid dummy_{eye}\n")
-            files["imagej_stl_available"] = True
-            files["selected_raw_stl_file"] = files["imagej_stl_file"]
-        s = self.status["workflow_steps"]["01_imagej_preprocessing"]
-        s["state"] = "complete"
-        s["symbol"] = "✓"
-        s["last_run"] = now()
-        s["needs_rerun"] = False
-        s["messages"] = []
-        append_log(self.analysis_folder, cv_id, "", "01_imagej_preprocessing", "dummy_imagej", "not_started", "complete", "success")
-        self.save_current_files()
-        self.refresh_all()
-
     def copy_external_stl(self, eye: str, notes: str) -> None:
         if not self.config or not self.analysis_folder:
             return
@@ -5996,17 +6459,6 @@ class CV3DMainWindow(QMainWindow):
         if not source:
             return
         self._copy_external_stl(Path(source), eye, notes)
-
-    def create_dummy_external_stl(self, eye: str, notes: str) -> None:
-        if not self.config or not self.analysis_folder:
-            return
-        tmp = self.analysis_folder / f"_temporary_dummy_source_{eye}.stl"
-        write_text(tmp, f"solid dummy_external_{eye}\nendsolid dummy_external_{eye}\n")
-        self._copy_external_stl(tmp, eye, notes)
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
 
     def _copy_external_stl(self, source: Path, eye: str, notes: str) -> None:
         cv_id = self.config["dataset_identity"]["cv_id"]
@@ -6022,60 +6474,6 @@ class CV3DMainWindow(QMainWindow):
         self.save_current_files()
         self.refresh_all()
 
-    def run_dummy_02(self, eye: str) -> None:
-        if not self.ensure_step_ready("02_blender_cornea_extraction", eye): return
-        files = self.config["eyes"][eye]["files"]
-        cv_id = self.config["dataset_identity"]["cv_id"]
-        task_file = self.analysis_folder / files["blender_step02_task_file"]
-        write_json(task_file, {"task_type": "cornea_extraction", "cv_id": cv_id, "eye": eye, "input": files["selected_raw_stl_file"]})
-        write_text(self.analysis_folder / files["cornea_stl_file"], f"solid {cv_id}_{eye}_cornea\nendsolid {cv_id}_{eye}_cornea\n")
-        write_text(self.analysis_folder / files["cornea_blend_file"], "DUMMY BLENDER FILE\n")
-        write_json(self.analysis_folder / files["blender_step02_status_file"], {
-            "status_version": "0.1",
-            "cv_id": cv_id,
-            "eye": eye,
-            "step_id": "02_blender_cornea_extraction",
-            "status": "exported",
-            "actions_confirmed": {
-                "raw_stl_imported": True,
-                "statistics_shown": True,
-                "scene_units_checked": True,
-                "corneal_surface_extracted_by_user": True,
-                "modifiers_added": True,
-                "normals_recalculated": True,
-                "ascii_stl_exported": True,
-                "single_selected_object_exported": True,
-                "blend_file_saved": True,
-            },
-            "modifiers": {
-                "decimate": {"exists": True, "added": True, "applied": False, "ratio": 0.5},
-                "smooth": {"exists": True, "added": True, "applied": False, "factor": 0.5, "iterations": 3},
-            },
-            "export_settings": {"format": "ASCII_STL", "selection_only": True, "selected_object_count": 1}
-        })
-        self.set_eye_step_state("02_blender_cornea_extraction", eye, "complete")
-        self.mark_downstream_needs_rerun("02_blender_cornea_extraction", eye)
-        self.save_current_files()
-        self.refresh_all()
-
-    def run_dummy_03a(self, eye: str) -> None:
-        if not self.ensure_step_ready("03a_local_height_calculation", eye): return
-        cv_id = self.config["dataset_identity"]["cv_id"]
-        files = self.config["eyes"][eye]["files"]
-        write_json(self.analysis_folder / files["r_step03a_task_file"], {"task_type": "local_height_calculation", "cv_id": cv_id, "eye": eye})
-        rows = [{"cv_id": cv_id, "eye": eye, "point_id": i, "x": 100+i, "y": 200+i, "z": 300+i, "nx": 0, "ny": 0, "nz": 1} for i in range(1, 11)]
-        write_csv(self.analysis_folder / files["triangles_normals_file"], ["cv_id","eye","point_id","x","y","z","nx","ny","nz"], rows)
-        hrows = [{"cv_id": cv_id, "eye": eye, "point_id": i, "x": 100+i, "y": 200+i, "z": 300+i, "local_height": float(i)} for i in range(1, 11)]
-        write_csv(self.analysis_folder / files["local_heights_file"], ["cv_id","eye","point_id","x","y","z","local_height"], hrows)
-        write_dummy_png(self.analysis_folder / files["local_height_threshold_plot"])
-        write_json(self.analysis_folder / files["r_step03a_status_file"], {
-            "status": "success", "summary": {"triangle_count": 10, "point_count": 10, "normal_count": 10, "max_cores_used": self.config["compute_settings"]["max_cores"]}
-        })
-        self.set_eye_step_state("03a_local_height_calculation", eye, "complete")
-        self.mark_downstream_needs_rerun("03a_local_height_calculation", eye)
-        self.save_current_files()
-        self.refresh_all()
-
     def create_threshold_plot(self, eye: str) -> None:
         if not self.ensure_eye_and_dataset(eye):
             return
@@ -6087,8 +6485,8 @@ class CV3DMainWindow(QMainWindow):
                 self,
                 "Missing threshold plot",
                 f"The local-height threshold plot is missing for {eye}:\n\n{rel_path}\n\n"
-                "Run 03A Local height calculation first. In the real workflow this plot is "
-                "created by the local-height calculation step and stored in the inspection folder."
+                "Run 03A Local height calculation first. This plot is created by the "
+                "local-height calculation step and stored in the inspection folder."
             )
             self.validate_current_workflow_outputs(save_changes=True)
             self.refresh_all()
@@ -6214,7 +6612,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -6377,7 +6775,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -6451,7 +6849,7 @@ class CV3DMainWindow(QMainWindow):
             return {
                 "rel": norm_rel,
                 "abs": norm_path,
-                "height_column": "local_height_log_norm",
+                "height_column": "local_height_norm_contrast",
                 "source": "normalized local heights",
             }
 
@@ -6462,13 +6860,13 @@ class CV3DMainWindow(QMainWindow):
             return {
                 "rel": raw_rel,
                 "abs": raw_path,
-                "height_column": "local_height_log",
+                "height_column": "local_height_contrast",
                 "source": "raw local heights",
             }
 
         return None
 
-    def plot_facet_points_on_local_heights(self, eye: str, point_kind: str) -> None:
+    def plot_facet_points_on_local_heights(self, eye: str, point_kind: str, automatic: bool = False) -> None:
         """Create a background PNG with facet candidates/positions overlaid on the local-height eye."""
         if not self.ensure_eye_and_dataset(eye):
             return
@@ -6509,6 +6907,7 @@ class CV3DMainWindow(QMainWindow):
             task_prefix = "03CP"
             overlay_color = "red"
         elif point_kind == "facet_positions":
+            self.make_blender_facet_names_authoritative(eye)
             point_rel = files.get("facet_positions_file")
             plot_rel = files.get("facet_positions_plot_file") or eye_inspection_rel_path(eye, f"04_{cv_id}_{eye}_facet_positions_on_local_height.png")
             required_step = "04_blender_facet_check_landmarking"
@@ -6552,17 +6951,20 @@ class CV3DMainWindow(QMainWindow):
             )
             return
 
-        open_reply = QMessageBox.question(
-            self,
-            "Open interactive rgl window?",
-            "Create the PNG overlay only, or also keep an interactive rgl 3D window open for inspection?\n\n"
-            "The PNG is saved in the background either way. If you choose Yes, the GUI will wait until you close the rgl window.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No
-        )
-        if open_reply == QMessageBox.StandardButton.Cancel:
-            return
-        open_rgl_window = (open_reply == QMessageBox.StandardButton.Yes)
+        if automatic:
+            open_rgl_window = True
+        else:
+            open_reply = QMessageBox.question(
+                self,
+                "Open interactive rgl window?",
+                "Create the PNG overlay only, or also keep an interactive rgl 3D window open for inspection?\n\n"
+                "The PNG is saved in the background either way. If you choose Yes, the GUI will wait until you close the rgl window.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No
+            )
+            if open_reply == QMessageBox.StandardButton.Cancel:
+                return
+            open_rgl_window = (open_reply == QMessageBox.StandardButton.Yes)
 
         task_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_task.json")
         status_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_status.json")
@@ -6613,9 +7015,28 @@ class CV3DMainWindow(QMainWindow):
             f"Working directory:\n{self.analysis_folder}\n"
         )
 
+        if automatic:
+            try:
+                out = stdout_path.open("w", encoding="utf-8", errors="replace")
+                err = stderr_path.open("w", encoding="utf-8", errors="replace")
+                try:
+                    process = subprocess.Popen(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                finally:
+                    out.close()
+                    err.close()
+                if not hasattr(self, "_background_plot_processes"):
+                    self._background_plot_processes = []
+                self._background_plot_processes = [p for p in self._background_plot_processes if p.poll() is None]
+                self._background_plot_processes.append(process)
+                with launch_diag_path.open("a", encoding="utf-8") as f:
+                    f.write(f"\nBackground process ID:\n{process.pid}\n")
+            except Exception as e:
+                QMessageBox.warning(self, "Facet point plot launch failed", str(e))
+            return
+
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -6658,17 +7079,22 @@ class CV3DMainWindow(QMainWindow):
 
     def get_05a_metric_plot_choices(self, optic_path: Path) -> List[tuple[str, str]]:
         preferred_labels = {
-            "size": "Facet size",
-            "delta_phi.deg": "IF angle (deg)",
-            "delta_phi.rad": "IF angle (rad)",
-            "P": "Eye parameter P",
-            "v": "Sensitivity v",
-            "CPD": "CPD",
-            "number.of.neighbours": "Number of neighbours",
+            "facet_size_smoothed": "Facet size (smoothed)",
+            "facet_size": "Facet size (raw)",
+            "interfacet_angle_deg": "IF angle (deg)",
+            "interfacet_angle_rad": "IF angle (rad)",
+            "eye_parameter": "Eye parameter",
+            "sampling_frequency_rad": "Sampling frequency (rad^-1)",
+            "acuity_cpd": "Acuity (cycles/degree)",
+            "number_of_neighbours": "Number of neighbours",
         }
         excluded = {
             "cv_id", "eye", "facet_id", "internal_ID", "CV", "ID", "type", "neighbours",
-            "x", "y", "z", "norm.x", "norm.y", "norm.z"
+            "x", "y", "z", "norm.x", "norm.y", "norm.z",
+            # Normal-estimator provenance/QC fields are retained in the CSV/export,
+            # but are not useful as generic per-facet biological metric plots.
+            "normal_envelope_factor", "normal_support_scale_um",
+            "normal_weight_cutoff_um", "normal_support_face_count", "n_neighbors_used", "n_neighbours_used"
         }
         rows: List[Dict[str, str]] = []
         fieldnames: List[str] = []
@@ -6700,7 +7126,7 @@ class CV3DMainWindow(QMainWindow):
             return False
 
         preferred_order = [
-            "size", "delta_phi.deg", "P", "CPD", "v", "delta_phi.rad", "number.of.neighbours"
+            "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd", "sampling_frequency_rad", "interfacet_angle_rad", "number_of_neighbours", "facet_size"
         ]
         ordered: List[str] = []
         for col in preferred_order:
@@ -6712,6 +7138,45 @@ class CV3DMainWindow(QMainWindow):
             if looks_numeric(col):
                 ordered.append(col)
         return [(col, preferred_labels.get(col, col)) for col in ordered]
+
+    def facet_size_estimate_for_plot(self) -> Optional[float]:
+        """Return a valid dataset-level facet-size estimate for plot fallback, if available."""
+        try:
+            value = float(self.read_facet_size_estimate_for_task())
+            if math.isfinite(value) and value > 0:
+                return value
+        except Exception:
+            pass
+        try:
+            value = float(self.config.get("parameters", {}).get("dataset_defaults", {}).get("facet_size_estimate"))
+            if math.isfinite(value) and value > 0:
+                return value
+        except Exception:
+            pass
+        return None
+
+    def default_facet_sphere_scale(self) -> float:
+        """Default QC sphere diameter is twice the facet diameter."""
+        return 2.0
+
+    def remember_plot_options(self, values: Dict[str, Any]) -> None:
+        """Persist non-scientific plot display settings without changing analysis defaults."""
+        defaults = self.config.setdefault("parameters", {}).setdefault("dataset_defaults", {})
+        if values.get("open_rgl_window"):
+            try:
+                scale = float(values.get("facet_sphere_scale", 2.0))
+                if math.isfinite(scale) and scale >= 0:
+                    defaults["facet_sphere_scale_last_used"] = scale
+            except Exception:
+                pass
+        if values.get("normal_length_facet_size_factor") is not None:
+            try:
+                value = float(values.get("normal_length_facet_size_factor"))
+                if math.isfinite(value) and value >= 0:
+                    defaults["facet_normal_length_factor"] = value
+            except Exception:
+                pass
+        self.save_current_files()
 
     def plot_05a_outputs(self, eye: str, plot_kind: str) -> None:
         if not self.ensure_eye_and_dataset(eye):
@@ -6744,62 +7209,57 @@ class CV3DMainWindow(QMainWindow):
             QMessageBox.warning(self, "05A outputs missing", f"Expected optic-parameter file not found:\n\n{optic_rel}")
             self.refresh_all()
             return
-        if plot_kind == "normals" and not normals_path.exists():
-            QMessageBox.warning(self, "05A normals missing", f"Expected facet-normal file not found:\n\n{normals_rel}")
-            self.refresh_all()
-            return
-
-        selected_metric_col = ""
-        selected_metric_label = ""
-        normal_length_facet_size_factor = None
+        metric_choices = None
         if plot_kind == "labelled_metric":
             metric_choices = self.get_05a_metric_plot_choices(optic_path)
+            if normals_path.exists():
+                metric_choices.append(("__facet_normals__", "Normals"))
             if not metric_choices:
-                QMessageBox.warning(self, "No plottable 05A values found", "No numeric 05A metric columns were found in the optic-parameter output.")
+                QMessageBox.warning(self, "No plottable 05A values found", "No numeric 05A metric columns or facet normals were found in the 05A outputs.")
                 return
-            metric_items = [f"{label} [{col}]" if label != col else col for col, label in metric_choices]
-            selected_item, ok = QInputDialog.getItem(
-                self,
-                "Choose 05A value to plot",
-                f"Select the 05A value to plot for {eye}:",
-                metric_items,
-                0,
-                False,
-            )
-            if not ok or not selected_item:
-                return
-            selected_index = metric_items.index(selected_item)
-            selected_metric_col, selected_metric_label = metric_choices[selected_index]
 
-        if plot_kind == "normals":
-            default_factor = 5.0
+        options = PlotOptionsDialog(
+            f"{eye} plot options",
+            self,
+            metric_choices=metric_choices,
+            open_rgl_default=True,
+            facet_sphere_scale_default=self.default_facet_sphere_scale(),
+        )
+        if options.exec() != QDialog.Accepted:
+            return
+        self.remember_plot_options(options.values)
+
+        selected_metric_col = str(options.values.get("selected_metric_col", ""))
+        selected_metric_label = str(options.values.get("selected_metric_label", ""))
+        open_rgl_window = bool(options.values.get("open_rgl_window", False))
+        facet_sphere_scale = float(options.values.get("facet_sphere_scale", 0.0))
+        facet_size_estimate = self.facet_size_estimate_for_plot()
+        normal_length_facet_size_factor = None
+        show_normals = True
+
+        if plot_kind == "labelled_metric" and selected_metric_col == "__facet_normals__":
+            if not normals_path.exists():
+                QMessageBox.warning(self, "05A normals missing", f"Expected facet-normal file not found:\n\n{normals_rel}")
+                self.refresh_all()
+                return
             try:
                 default_factor = float(self.config.get("parameters", {}).get("dataset_defaults", {}).get("facet_normal_length_factor", 5.0))
             except Exception:
                 default_factor = 5.0
-            normal_length_facet_size_factor, ok = QInputDialog.getDouble(
+            normal_options = NormalPlotOptionsDialog(
+                f"{eye} normal options",
                 self,
-                "05A facet-normal length",
-                "Normal length as multiple of facet size:",
-                default_factor,
-                0.0,
-                1_000_000.0,
-                4,
+                normal_length_default=default_factor,
+                show_normals_default=True,
             )
-            if not ok:
+            if normal_options.exec() != QDialog.Accepted:
                 return
-
-        open_reply = QMessageBox.question(
-            self,
-            "Open interactive rgl window?",
-            "Create the PNG only, or also keep an interactive rgl window open for inspection.\n\n"
-            "The PNG is saved in the background either way. If you choose Yes, the GUI will wait until you close the rgl window.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No
-        )
-        if open_reply == QMessageBox.StandardButton.Cancel:
-            return
-        open_rgl_window = (open_reply == QMessageBox.StandardButton.Yes)
+            self.remember_plot_options(normal_options.values)
+            normal_length_facet_size_factor = normal_options.values.get("normal_length_facet_size_factor")
+            show_normals = bool(normal_options.values.get("show_normals", True))
+            plot_kind = "normals"
+            selected_metric_col = ""
+            selected_metric_label = "Normals"
 
         if plot_kind == "optics":
             task_prefix = "05AP"
@@ -6808,7 +7268,7 @@ class CV3DMainWindow(QMainWindow):
         elif plot_kind == "normals":
             task_prefix = "05AN"
             label = "05A facet-normal plot"
-            output_png_rel = eye_inspection_rel_path(eye, f"05A_{cv_id}_{eye}_facet_normals.png")
+            output_png_rel = eye_inspection_rel_path(eye, f"05A_{cv_id}_{eye}_facet_normals_direction_colour.png")
         elif plot_kind == "labelled_metric":
             task_prefix = "05AL"
             label = f"05A labelled metric plot ({selected_metric_label})"
@@ -6838,9 +7298,12 @@ class CV3DMainWindow(QMainWindow):
             "output_plot_png": str(output_png_rel),
             "output_plot_png_abs": str(self.analysis_folder / output_png_rel),
             "open_rgl_window": open_rgl_window,
+            "facet_sphere_scale": facet_sphere_scale,
+            "facet_size_estimate": facet_size_estimate,
             "selected_metric_col": selected_metric_col,
             "selected_metric_label": selected_metric_label,
             "normal_length_facet_size_factor": normal_length_facet_size_factor,
+            "show_normals": show_normals,
             "parameters": {"normal_length_facet_size_factor": normal_length_facet_size_factor} if normal_length_facet_size_factor is not None else {},
             "status_file": status_rel,
             "status_file_abs": str(self.analysis_folder / status_rel),
@@ -6866,7 +7329,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -6993,17 +7456,18 @@ class CV3DMainWindow(QMainWindow):
             self.refresh_all()
             return
 
-        open_reply = QMessageBox.question(
+        options = PlotOptionsDialog(
+            f"{eye} plot options",
             self,
-            "Open interactive rgl window?",
-            "Create the PNG only, or also keep an interactive rgl window open for inspection.\n\n"
-            "The PNG is saved in the background either way. If you choose Yes, the GUI will wait until you close the rgl window.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No
+            open_rgl_default=True,
+            facet_sphere_scale_default=self.default_facet_sphere_scale(),
         )
-        if open_reply == QMessageBox.StandardButton.Cancel:
+        if options.exec() != QDialog.Accepted:
             return
-        open_rgl_window = (open_reply == QMessageBox.StandardButton.Yes)
+        self.remember_plot_options(options.values)
+        open_rgl_window = bool(options.values.get("open_rgl_window", False))
+        facet_sphere_scale = float(options.values.get("facet_sphere_scale", 0.0))
+        facet_size_estimate = self.facet_size_estimate_for_plot()
 
         task_prefix = "05BP"
         label = "05B global-alignment QC plot"
@@ -7032,6 +7496,8 @@ class CV3DMainWindow(QMainWindow):
             "output_reference_plot_png": str(output_reference_png_rel),
             "output_reference_plot_png_abs": str(self.analysis_folder / output_reference_png_rel),
             "open_rgl_window": open_rgl_window,
+            "facet_sphere_scale": facet_sphere_scale,
+            "facet_size_estimate": facet_size_estimate,
             "status_file": status_rel,
             "status_file_abs": str(self.analysis_folder / status_rel),
             "stdout_file": stdout_rel,
@@ -7058,7 +7524,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -7147,17 +7613,18 @@ class CV3DMainWindow(QMainWindow):
             self.refresh_all()
             return
 
-        open_reply = QMessageBox.question(
+        options = PlotOptionsDialog(
+            f"{eye} plot options",
             self,
-            "Open interactive rgl window?",
-            "Create the PNGs only, or also keep an interactive rgl window open for inspection.\n\n"
-            "The PNGs are saved in the background either way. If you choose Yes, the GUI will wait until you close the rgl window.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No
+            open_rgl_default=True,
+            facet_sphere_scale_default=self.default_facet_sphere_scale(),
         )
-        if open_reply == QMessageBox.StandardButton.Cancel:
+        if options.exec() != QDialog.Accepted:
             return
-        open_rgl_window = (open_reply == QMessageBox.StandardButton.Yes)
+        self.remember_plot_options(options.values)
+        open_rgl_window = bool(options.values.get("open_rgl_window", False))
+        facet_sphere_scale = float(options.values.get("facet_sphere_scale", 0.0))
+        facet_size_estimate = self.facet_size_estimate_for_plot()
 
         task_prefix = "05CP"
         label = "05C corneal-projection QC plots"
@@ -7166,7 +7633,7 @@ class CV3DMainWindow(QMainWindow):
             axis: str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_{axis}.png"))
             for axis in ["front", "back", "left", "right", "top", "bottom"]
         }
-        output_pngs["latlon"] = str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_latlon.png"))
+        output_pngs["view_angles"] = str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_view_angles.png"))
         output_pngs["rgl_3d"] = str(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_3d_qc.png"))
 
         task_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{output_eye_tag}_R_task.json")
@@ -7187,6 +7654,8 @@ class CV3DMainWindow(QMainWindow):
             "output_plot_png": eye_inspection_rel_path(eye, f"05C_{cv_id}_{output_eye_tag}_corneal_projection_3d_qc.png"),
             "output_plot_png_abs": output_pngs["rgl_3d"],
             "open_rgl_window": open_rgl_window,
+            "facet_sphere_scale": facet_sphere_scale,
+            "facet_size_estimate": facet_size_estimate,
             "make_rgl_snapshot": False,
             "status_file": status_rel,
             "status_file_abs": str(self.analysis_folder / status_rel),
@@ -7214,7 +7683,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -7224,7 +7693,7 @@ class CV3DMainWindow(QMainWindow):
             return
 
         status_path = self.analysis_folder / status_rel
-        primary_plot_path = Path(output_pngs["latlon"])
+        primary_plot_path = Path(output_pngs["view_angles"])
         rgl_snapshot_path = Path(output_pngs["rgl_3d"])
         runner_status = "unknown"
         status_message = ""
@@ -7243,7 +7712,7 @@ class CV3DMainWindow(QMainWindow):
             details = [
                 f"Rscript exit code: {exit_code}",
                 f"Runner status: {runner_status}",
-                f"Latitude/longitude PNG exists: {primary_plot_path.exists()}",
+                f"Elevation/azimuth PNG exists: {primary_plot_path.exists()}",
                 f"3D rgl snapshot PNG exists (optional): {rgl_snapshot_path.exists()}",
                 f"Launch log: {launch_rel}",
                 f"stdout log: {stdout_rel}",
@@ -7481,7 +7950,7 @@ class CV3DMainWindow(QMainWindow):
             f"Weight exponent: {params['weight_exponent']}\n"
             f"Iterations: {params['max_iterations']}\n"
             f"Cores: {params['cores']}\n\n"
-            "The GUI will wait until Rscript finishes.",
+            "The GUI will wait until Rscript finishes. After successful condensation, the facet-candidate inspection plot will open automatically.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -7512,7 +7981,7 @@ class CV3DMainWindow(QMainWindow):
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_diag_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -7544,7 +8013,8 @@ class CV3DMainWindow(QMainWindow):
                 r_status = "unreadable_status_json"
                 status_message = str(e)
 
-        if exit_code == 0 and r_status == "success" and output_candidates.exists():
+        condensation_succeeded = exit_code == 0 and r_status == "success" and output_candidates.exists()
+        if condensation_succeeded:
             messages = [f"R Step 03C finished with status: {r_status}."]
             if candidate_count is not None:
                 messages.append(f"Facet candidate count: {candidate_count}.")
@@ -7609,63 +8079,8 @@ class CV3DMainWindow(QMainWindow):
         self.validate_current_workflow_outputs(save_changes=True)
         self.refresh_all()
 
-    def run_dummy_03c(self, eye: str) -> None:
-        if not self.ensure_step_ready("03c_facet_candidate_condensation", eye): return
-        cv_id = self.config["dataset_identity"]["cv_id"]
-        defaults = self.config["parameters"]["dataset_defaults"]
-        facet_size = float(defaults.get("facet_size_estimate") or 25.0)
-        final_suggestion = self.get_suggested_value(eye, "facet_center_convergence_final", 1.5 * facet_size)
-        dlg = RuntimeParamDialog(
-            "03C Facet candidate condensation",
-            {
-                "facet_center_convergence_min": defaults.get("facet_center_convergence_min") or 8.0,
-                "facet_center_convergence_max": defaults.get("facet_center_convergence_max") or 40.0,
-                "facet_center_convergence_final": final_suggestion,
-            },
-            self,
-            show_force_matrix=True,
-            force_matrix_checked=force,
-        )
-        if dlg.exec() != QDialog.Accepted:
-            return
-        params = dlg.values
-        files = self.config["eyes"][eye]["files"]
-        write_json(self.analysis_folder / files["r_step03c_task_file"], {"task_type": "facet_center_convergence", "cv_id": cv_id, "eye": eye, "parameters": params})
-        rows = []
-        for i in range(1, 8):
-            facet_id = f"F{i:06d}"
-            island_id = f"I{i:06d}"
-            rows.append({
-                "cv_id": cv_id, "eye": eye, "facet_id": facet_id, "island_id": island_id,
-                "blender_object_name": f"facet_{facet_id}",
-                "x": 100 + i * 10, "y": 200 + i * 5, "z": 300 + i * 2,
-            })
-        write_csv(self.analysis_folder / files["facet_candidates_file"], ["cv_id","eye","facet_id","island_id","blender_object_name","x","y","z"], rows)
-        write_text(self.analysis_folder / files["facet_island_distance_matrix_file"], "DUMMY DISTANCE MATRIX\n")
-        write_json(self.analysis_folder / files["facet_island_distance_matrix_metadata_file"], {"cv_id": cv_id, "eye": eye, "valid_for_dummy": True})
-        write_json(self.analysis_folder / files["r_step03c_status_file"], {
-            "status": "success",
-            "summary": {
-                "facet_island_point_count": 58000,
-                "distance_matrix_reused": not params.get("force_new_distance_matrix", False),
-                "distance_matrix_recalculated": bool(params.get("force_new_distance_matrix", False)),
-                "facet_center_convergence_min": params["facet_center_convergence_min"],
-                "facet_center_convergence_max": params["facet_center_convergence_max"],
-                "facet_center_convergence_final": params["facet_center_convergence_final"],
-                "max_cores_used": self.config["compute_settings"]["max_cores"],
-                "facet_center_count": len(rows),
-            }
-        })
-        if params["update_default"]:
-            defaults["facet_center_convergence_min"] = params["facet_center_convergence_min"]
-            defaults["facet_center_convergence_max"] = params["facet_center_convergence_max"]
-            defaults["facet_center_convergence_final"] = params["facet_center_convergence_final"]
-        self.config["parameters"][f"{eye}_last_used"]["facet_center_convergence_final"] = params["facet_center_convergence_final"]
-        self.config["parameter_history"].append({"timestamp": now(), "eye": eye, "step": "03C", "parameter_values": params, "result": "success"})
-        self.set_eye_step_state("03c_facet_candidate_condensation", eye, "complete")
-        self.mark_downstream_needs_rerun("03c_facet_candidate_condensation", eye)
-        self.save_current_files()
-        self.refresh_all()
+        if condensation_succeeded:
+            self.plot_facet_points_on_local_heights(eye, "facet_candidates", automatic=True)
 
     def create_blender_step04_task(self, eye: str) -> Path:
         cv_id = self.config["dataset_identity"]["cv_id"]
@@ -7764,7 +8179,7 @@ class CV3DMainWindow(QMainWindow):
         write_text(launch_path, "Command:\n" + " ".join(chr(34) + str(part) + chr(34) for part in cmd) + "\n")
 
         try:
-            result = subprocess.run(cmd, cwd=str(self.analysis_folder))
+            result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder))
             exit_code = result.returncode
             with launch_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -7909,13 +8324,13 @@ class CV3DMainWindow(QMainWindow):
         launch_path = self.analysis_folder / launch_rel
         launch_path.parent.mkdir(parents=True, exist_ok=True)
         if blend_path.exists():
-            cmd = [str(blender_exe), str(blend_path), "--python", str(blender_script), "--", relative_task_argument(task_path, self.analysis_folder)]
+            cmd = [str(blender_exe), str(blend_path), "--python", str(blender_script), "--", str(task_path.resolve())]
         else:
-            cmd = [str(blender_exe), "--python", str(blender_script), "--", relative_task_argument(task_path, self.analysis_folder)]
+            cmd = [str(blender_exe), "--python", str(blender_script), "--", str(task_path.resolve())]
         write_text(launch_path, "Command:\n" + " ".join(chr(34) + str(part) + chr(34) for part in cmd) + "\n")
 
         try:
-            result = subprocess.run(cmd, cwd=str(self.analysis_folder))
+            result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder))
             exit_code = result.returncode
             with launch_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -8009,7 +8424,7 @@ class CV3DMainWindow(QMainWindow):
         write_text(launch_path, "Command:\n" + " ".join(chr(34) + str(part) + chr(34) for part in cmd) + "\n\n" + f"Working directory:\n{self.analysis_folder}\n")
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
-                result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
             exit_code = result.returncode
             with launch_path.open("a", encoding="utf-8") as f:
                 f.write(f"\nExit code:\n{exit_code}\n")
@@ -8060,9 +8475,93 @@ class CV3DMainWindow(QMainWindow):
         self.validate_current_workflow_outputs(save_changes=True)
         self.refresh_all()
 
-    def create_r_step05a_task(self, eye: str, edge_tol: float, cores: int) -> Path:
+    def make_blender_facet_names_authoritative(self, eye: str) -> bool:
+        """Use canonical Blender facet names as facet_id values in an existing Step 04 export."""
+        files = self.config["eyes"][eye]["files"]
+        path = self.analysis_folder / files["facet_positions_file"]
+        if not path.exists():
+            return False
+
+        with path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+
+        if "facet_id" not in fieldnames or "blender_object_name" not in fieldnames:
+            return False
+
+        def is_canonical(name: str) -> bool:
+            return bool(re.fullmatch(r"F\d{5}", str(name or "").strip()))
+
+        def extract_numeric_suffix(value: str):
+            m = re.search(r"(\d+)$", str(value or "").strip())
+            return int(m.group(1)) if m else None
+
+        def canonical_imported(name: str):
+            idx = extract_numeric_suffix(name)
+            if idx is None or idx < 0 or idx > 99999:
+                return None
+            return f"F{idx:05d}"
+
+        used = set()
+        planned = []
+
+        for row in rows:
+            blender_name = str(row.get("blender_object_name", "") or "").strip()
+            if is_canonical(blender_name):
+                planned.append(blender_name)
+                used.add(blender_name)
+            else:
+                planned.append(None)
+
+        for i, row in enumerate(rows):
+            if planned[i] is not None:
+                continue
+            blender_name = str(row.get("blender_object_name", "") or "").strip()
+            proposed = canonical_imported(blender_name)
+            if proposed and proposed not in used:
+                planned[i] = proposed
+                used.add(proposed)
+
+        manual_counter = max([int(name[1:]) for name in used if is_canonical(name) and name.startswith("F9")] or [90000])
+        for i, row in enumerate(rows):
+            if planned[i] is not None:
+                continue
+            while True:
+                manual_counter += 1
+                if manual_counter > 99999:
+                    raise ValueError("No free manual facet IDs remain in the F9XXXX range.")
+                proposed = f"F{manual_counter:05d}"
+                if proposed not in used:
+                    planned[i] = proposed
+                    used.add(proposed)
+                    break
+
+        if len(set(planned)) != len(planned):
+            raise ValueError(
+                "Facet names in the facet-position table are not unique after canonical renaming. "
+                "Facet names must be unique before downstream analysis can run."
+            )
+
+        changed = False
+        for row, name in zip(rows, planned):
+            if not name:
+                continue
+            if str(row.get("blender_object_name", "") or "") != name:
+                row["blender_object_name"] = name
+                changed = True
+            if str(row.get("facet_id", "") or "") != name:
+                row["facet_id"] = name
+                changed = True
+
+        if changed:
+            write_csv(path, fieldnames, rows)
+        return changed
+
+    def create_r_step05a_task(self, eye: str, edge_tol: float, cores: int, lattice: str, normal_method: str, normal_envelope_factor: Optional[float]) -> Path:
         cv_id = self.config["dataset_identity"]["cv_id"]
         files = self.config["eyes"][eye]["files"]
+        self.make_blender_facet_names_authoritative(eye)
         facet_size = self.config.get("parameters", {}).get("dataset_defaults", {}).get("facet_size_estimate", 14)
         task = {
             "task_type": "05A_optical_metrics",
@@ -8080,8 +8579,8 @@ class CV3DMainWindow(QMainWindow):
             "output_facet_sizes_abs": str(self.analysis_folder / files["facet_sizes_file"]),
             "output_interfacet_angles": files["interfacet_angles_file"],
             "output_interfacet_angles_abs": str(self.analysis_folder / files["interfacet_angles_file"]),
-            "output_sensitivity_acuity": files["sensitivity_acuity_file"],
-            "output_sensitivity_acuity_abs": str(self.analysis_folder / files["sensitivity_acuity_file"]),
+            "output_sampling_acuity": files["sampling_acuity_file"],
+            "output_sampling_acuity_abs": str(self.analysis_folder / files["sampling_acuity_file"]),
             "output_optical_summary": files["optical_summary_file"],
             "output_optical_summary_abs": str(self.analysis_folder / files["optical_summary_file"]),
             "output_diagnostic_pdf": eye_inspection_rel_path(eye, f"05A_{cv_id}_{eye}_optic_diagnostics.pdf"),
@@ -8092,7 +8591,14 @@ class CV3DMainWindow(QMainWindow):
             "stdout_file_abs": str(self.analysis_folder / eye_log_rel_path(eye, f"05A_{cv_id}_{eye}_R_stdout.log")),
             "stderr_file": eye_log_rel_path(eye, f"05A_{cv_id}_{eye}_R_stderr.log"),
             "stderr_file_abs": str(self.analysis_folder / eye_log_rel_path(eye, f"05A_{cv_id}_{eye}_R_stderr.log")),
-            "parameters": {"edge_tol": float(edge_tol), "cores": int(cores), "facet_size_estimate": float(facet_size)},
+            "parameters": {
+                "edge_tol": float(edge_tol),
+                "cores": int(cores),
+                "facet_size_estimate": float(facet_size),
+                "lattice": str(lattice),
+                "normal_method": str(normal_method),
+                "normal_envelope_factor": (float(normal_envelope_factor) if normal_envelope_factor is not None else None),
+            },
         }
         task_path = self.analysis_folder / files["r_step05a_task_file"]
         write_json(task_path, task)
@@ -8102,10 +8608,53 @@ class CV3DMainWindow(QMainWindow):
         if not self.ensure_step_ready("05a_optical_metrics", eye):
             return
         max_cores = int(self.config.get("compute_settings", {}).get("max_cores") or self.settings.get("compute_settings", {}).get("max_cores") or 1)
-        dlg = RuntimeParamDialog("05A Optical metrics", {"edge_tol": 0.5, "cores": max_cores}, self)
+        defaults = self.config["parameters"]["dataset_defaults"]
+        lattice_default = str(defaults.get("sampling_lattice", "hexagonal"))
+        normal_method_default = str(defaults.get("facet_normal_method", "envelope"))
+        try:
+            normal_envelope_factor_default = float(defaults.get("facet_normal_envelope_factor", 1.25))
+        except Exception:
+            normal_envelope_factor_default = 1.25
+        dlg = RuntimeParamDialog(
+            "05A Optical metrics",
+            {"edge_tol": 0.5, "cores": max_cores},
+            self,
+            show_lattice=True,
+            lattice_default=lattice_default,
+            show_normal_method=True,
+            normal_method_default=normal_method_default,
+            normal_envelope_factor_default=normal_envelope_factor_default,
+            info_text=(
+                "Neighbour-link tolerance is the relative allowance used when deciding whether a candidate link is a true facet-neighbour link. "
+                "At 0.5, links up to 1.5× the larger local facet-spacing estimate of the two facets are retained. "
+                "Lower values are stricter; higher values retain more links."
+            ),
+        )
         if dlg.exec() != QDialog.Accepted:
             return
-        task_path = self.create_r_step05a_task(eye, dlg.values["edge_tol"], int(dlg.values["cores"]))
+        lattice = str(dlg.values.get("lattice", "hexagonal"))
+        normal_method = str(dlg.values.get("normal_method", "envelope"))
+        normal_envelope_factor = dlg.values.get("normal_envelope_factor")
+        if normal_method == "envelope":
+            try:
+                normal_envelope_factor = float(normal_envelope_factor)
+            except Exception:
+                normal_envelope_factor = 1.25
+        else:
+            normal_envelope_factor = None
+        task_path = self.create_r_step05a_task(
+            eye,
+            dlg.values["edge_tol"],
+            int(dlg.values["cores"]),
+            lattice,
+            normal_method,
+            normal_envelope_factor,
+        )
+        if dlg.values.get("update_default"):
+            defaults["sampling_lattice"] = lattice
+            defaults["facet_normal_method"] = normal_method
+            if normal_method == "envelope" and normal_envelope_factor is not None:
+                defaults["facet_normal_envelope_factor"] = float(normal_envelope_factor)
         self.run_r_analysis_script(eye, "05a_optical_metrics", "r_step05a_script_path", task_path, "05A optical metrics completed.")
 
     def create_r_step05b_task(self, eye: str, priority: str) -> Path:
@@ -8168,6 +8717,13 @@ class CV3DMainWindow(QMainWindow):
     def create_r_step05c_task(self, eye: str, sphere_size_cm: float, center_mode: str) -> Path:
         cv_id = self.config["dataset_identity"]["cv_id"]
         files = self.config["eyes"][eye]["files"]
+        other_eye = "eye2" if eye == "eye1" else "eye1"
+        other_files = self.config.get("eyes", {}).get(other_eye, {}).get("files", {})
+        other_global_rel = other_files.get("global_coordinates_file", "")
+        other_global_abs = str(self.analysis_folder / other_global_rel) if other_global_rel else ""
+        if not other_global_rel or not Path(other_global_abs).exists():
+            other_global_rel = ""
+            other_global_abs = ""
         task = {
             "task_type": "05C_corneal_projections",
             "task_prefix": "05C",
@@ -8176,6 +8732,8 @@ class CV3DMainWindow(QMainWindow):
             "analysis_folder": str(self.analysis_folder),
             "input_global_coordinates": files["global_coordinates_file"],
             "input_global_coordinates_abs": str(self.analysis_folder / files["global_coordinates_file"]),
+            "input_other_eye_global_coordinates": other_global_rel,
+            "input_other_eye_global_coordinates_abs": other_global_abs,
             "output_corneal_projections": files["corneal_projections_file"],
             "output_corneal_projections_abs": str(self.analysis_folder / files["corneal_projections_file"]),
             "status_file": files["r_step05c_status_file"],
@@ -8184,7 +8742,11 @@ class CV3DMainWindow(QMainWindow):
             "stdout_file_abs": str(self.analysis_folder / eye_log_rel_path(eye, f"05C_{cv_id}_{eye}_R_stdout.log")),
             "stderr_file": eye_log_rel_path(eye, f"05C_{cv_id}_{eye}_R_stderr.log"),
             "stderr_file_abs": str(self.analysis_folder / eye_log_rel_path(eye, f"05C_{cv_id}_{eye}_R_stderr.log")),
-            "parameters": {"corneal_projection_sphere_size_um": float(sphere_size_cm) * 10000.0, "projection_center_mode": center_mode},
+            "parameters": {
+                "corneal_projection_sphere_size_cm": float(sphere_size_cm),
+                "corneal_projection_sphere_size_um": float(sphere_size_cm) * 10000.0,
+                "projection_center_mode": center_mode,
+            },
         }
         task_path = self.analysis_folder / files["r_step05c_task_file"]
         write_json(task_path, task)
@@ -8195,7 +8757,13 @@ class CV3DMainWindow(QMainWindow):
             return
         defaults = self.config["parameters"]["dataset_defaults"]
         suggested = self.get_suggested_value(eye, "corneal_projection_sphere_size_cm", defaults.get("corneal_projection_sphere_size_cm", 15.0))
-        dlg = RuntimeParamDialog("05C Corneal projections", {"corneal_projection_sphere_size_cm": suggested}, self, show_projection_center=True)
+        dlg = RuntimeParamDialog(
+            "05C Corneal projections",
+            {"corneal_projection_sphere_size_cm": suggested},
+            self,
+            show_projection_center=True,
+            projection_center_default=defaults.get("projection_center_mode", "between_eyes"),
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         sphere = dlg.values["corneal_projection_sphere_size_cm"]
@@ -8206,87 +8774,6 @@ class CV3DMainWindow(QMainWindow):
             defaults["projection_center_mode"] = center_mode
             self.config["parameters"][f"{eye}_last_used"]["corneal_projection_sphere_size_cm"] = sphere
         self.run_r_analysis_script(eye, "05c_corneal_projections", "r_step05c_script_path", task_path, "05C corneal projections completed.")
-
-    def run_dummy_05a(self, eye: str) -> None:
-        if not self.ensure_step_ready("05a_optical_metrics", eye): return
-        cv_id = self.config["dataset_identity"]["cv_id"]
-        files = self.config["eyes"][eye]["files"]
-        write_json(self.analysis_folder / files["r_step05a_task_file"], {"task_type": "optical_metrics", "cv_id": cv_id, "eye": eye})
-        size_rows = [{"cv_id": cv_id, "eye": eye, "facet_id": f"F{i:06d}", "facet_size": 20+i, "facet_size_unit": "um", "data_origin": "computed"} for i in range(1, 8)]
-        write_csv(self.analysis_folder / files["facet_sizes_file"], ["cv_id","eye","facet_id","facet_size","facet_size_unit","data_origin"], size_rows)
-        angle_rows = []
-        for i in range(1, 8):
-            for rank in range(1, min(6, 7-1)+1):
-                neigh = ((i + rank - 1) % 7) + 1
-                if neigh == i:
-                    continue
-                angle_rows.append({"cv_id": cv_id, "eye": eye, "facet_id": f"F{i:06d}", "neighbor_rank": rank, "neighbor_facet_id": f"F{neigh:06d}", "interfacet_angle": 3.5 + rank * 0.2, "angle_unit": "degrees"})
-        write_csv(self.analysis_folder / files["interfacet_angles_file"], ["cv_id","eye","facet_id","neighbor_rank","neighbor_facet_id","interfacet_angle","angle_unit"], angle_rows)
-        sa_rows = [{"cv_id": cv_id, "eye": eye, "facet_id": f"F{i:06d}", "sensitivity": 0.1*i, "acuity": 1.0/(i+1), "sensitivity_model": "dummy", "acuity_unit": "dummy", "data_origin": "computed"} for i in range(1, 8)]
-        write_csv(self.analysis_folder / files["sensitivity_acuity_file"], ["cv_id","eye","facet_id","sensitivity","acuity","sensitivity_model","acuity_unit","data_origin"], sa_rows)
-        write_csv(self.analysis_folder / files["optical_summary_file"], ["cv_id","eye","facet_count","mean_facet_size"], [{"cv_id": cv_id, "eye": eye, "facet_count": 7, "mean_facet_size": 24.0}])
-        write_json(self.analysis_folder / files["r_step05a_status_file"], {"status": "success", "summary": {"facet_count": 7}})
-        self.set_eye_step_state("05a_optical_metrics", eye, "complete")
-        self.mark_downstream_needs_rerun("05a_optical_metrics", eye)
-        self.save_current_files()
-        self.refresh_all()
-
-    def run_dummy_05b(self, eye: str) -> None:
-        if not self.ensure_step_ready("05b_global_coordinate_rotation", eye): return
-        cv_id = self.config["dataset_identity"]["cv_id"]
-        files = self.config["eyes"][eye]["files"]
-        write_json(self.analysis_folder / files["r_step05b_task_file"], {"task_type": "global_coordinate_rotation", "cv_id": cv_id, "eye": eye})
-        rows = [{"cv_id": cv_id, "eye": eye, "facet_id": f"F{i:06d}", "x_original": 100+i, "y_original": 200+i, "z_original": 300+i, "x_global": -10+i, "y_global": 5+i, "z_global": 20+i, "data_origin": "computed"} for i in range(1, 8)]
-        write_csv(self.analysis_folder / files["global_coordinates_file"], ["cv_id","eye","facet_id","x_original","y_original","z_original","x_global","y_global","z_global","data_origin"], rows)
-        mat = []
-        for r in range(1, 4):
-            for c in range(1, 4):
-                mat.append({"row": r, "col": c, "value": 1 if r == c else 0})
-        write_csv(self.analysis_folder / files["global_rotation_matrix_file"], ["row","col","value"], mat)
-        write_json(self.analysis_folder / files["global_coordinate_metadata_file"], {
-            "axis_convention": {
-                "x_axis": "anatomical_left_to_right",
-                "y_axis": "posterior_to_anterior",
-                "z_axis": "ventral_to_dorsal_inferred"
-            }
-        })
-        write_json(self.analysis_folder / files["r_step05b_status_file"], {"status": "success", "summary": {"facet_count": 7, "axis_convention": "dummy"}})
-        self.set_eye_step_state("05b_global_coordinate_rotation", eye, "complete")
-        self.mark_downstream_needs_rerun("05b_global_coordinate_rotation", eye)
-        self.save_current_files()
-        self.refresh_all()
-
-    def run_dummy_05c(self, eye: str) -> None:
-        if not self.ensure_step_ready("05c_corneal_projections", eye): return
-        cv_id = self.config["dataset_identity"]["cv_id"]
-        defaults = self.config["parameters"]["dataset_defaults"]
-        suggested = self.get_suggested_value(eye, "corneal_projection_sphere_size_cm", defaults["corneal_projection_sphere_size_cm"])
-        dlg = RuntimeParamDialog("05C Corneal projections", {"corneal_projection_sphere_size_cm": suggested}, self, show_projection_center=True)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        sphere = dlg.values["corneal_projection_sphere_size_cm"]
-        center_mode = dlg.values["projection_center_mode"]
-        files = self.config["eyes"][eye]["files"]
-        write_json(self.analysis_folder / files["r_step05c_task_file"], {"task_type": "corneal_projections", "cv_id": cv_id, "eye": eye, "parameters": dlg.values})
-        view_axes = ["front", "back", "left", "right", "top", "bottom"]
-        rows = []
-        for axis in view_axes:
-            for i in range(1, 8):
-                rows.append({"cv_id": cv_id, "eye": eye, "facet_id": f"F{i:06d}", "view_axis": axis, "projection_center_mode": center_mode, "projection_x": i, "projection_y": i*2, "projection_z": i*3, "projection_sphere_size_um": sphere * 10000.0})
-            write_dummy_png(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{eye}_corneal_projection_{axis}.png"))
-        write_dummy_png(self.analysis_folder / eye_inspection_rel_path(eye, f"05C_{cv_id}_{eye}_corneal_projection_latlon.png"))
-        write_csv(self.analysis_folder / files["corneal_projections_file"], ["cv_id","eye","facet_id","view_axis","projection_center_mode","projection_x","projection_y","projection_z","projection_sphere_size_um"], rows)
-        write_json(self.analysis_folder / files["r_step05c_status_file"], {"status": "success", "summary": {"projection_sphere_size_um": sphere * 10000.0, "projection_center_mode": center_mode, "view_axes_generated": view_axes}})
-        if dlg.values["update_default"]:
-            defaults["corneal_projection_sphere_size_cm"] = sphere
-            defaults["projection_center_mode"] = center_mode
-        self.config["parameters"][f"{eye}_last_used"]["corneal_projection_sphere_size_cm"] = sphere
-        self.set_eye_step_state("05c_corneal_projections", eye, "complete")
-        self.mark_downstream_needs_rerun("05c_corneal_projections", eye)
-        self.save_current_files()
-        self.refresh_all()
-
-    # ---------- mirroring/report ----------
 
     def create_mirrored_outputs(self) -> None:
         if not self.config or not self.status or not self.analysis_folder:
@@ -8317,7 +8804,7 @@ class CV3DMainWindow(QMainWindow):
         flip_axis = {"xy": "z", "yz": "x", "xz": "y"}.get(mirror_plane, "x")
         created_at = now()
 
-        def wrap_longitude(value: float) -> float:
+        def wrap_azimuth(value: float) -> float:
             return ((value + 180.0) % 360.0) - 180.0
 
         def mirror_numeric_value(value: Any) -> Any:
@@ -8343,18 +8830,18 @@ class CV3DMainWindow(QMainWindow):
                 return low.startswith(("norm", "normal", "corn", "projection", "sphere", "center", "roi", "ref", "data"))
             return False
 
-        def mirror_latlon_if_present(row: Dict[str, Any]) -> None:
-            # These latitude/longitude adjustments follow the existing 05C convention
-            # where longitude 0 degrees is the animal front.
-            if "latitude" in row and mirror_plane == "xy":
-                row["latitude"] = mirror_numeric_value(row.get("latitude"))
-            if "longitude" in row:
+        def mirror_view_angles_if_present(row: Dict[str, Any]) -> None:
+            elevation_key = "elevation" if "elevation" in row else ("latitude" if "latitude" in row else None)
+            azimuth_key = "azimuth" if "azimuth" in row else ("longitude" if "longitude" in row else None)
+            if elevation_key and mirror_plane == "xy":
+                row[elevation_key] = mirror_numeric_value(row.get(elevation_key))
+            if azimuth_key:
                 try:
-                    lon = float(row.get("longitude"))
+                    angle = float(row.get(azimuth_key))
                     if mirror_plane == "yz":
-                        row["longitude"] = str(wrap_longitude(-lon))
+                        row[azimuth_key] = str(wrap_azimuth(-angle))
                     elif mirror_plane == "xz":
-                        row["longitude"] = str(wrap_longitude(180.0 - lon))
+                        row[azimuth_key] = str(wrap_azimuth(180.0 - angle))
                 except Exception:
                     pass
 
@@ -8392,7 +8879,7 @@ class CV3DMainWindow(QMainWindow):
                         for col in list(row.keys()):
                             if column_matches_axis(col, flip_axis):
                                 row[col] = mirror_numeric_value(row[col])
-                        mirror_latlon_if_present(row)
+                        mirror_view_angles_if_present(row)
                     if "eye" in row:
                         row["eye"] = derived_eye_id
                     row["data_origin"] = "mirrored_landmark_not_transformed" if is_landmark else "mirrored"
@@ -8463,7 +8950,7 @@ class CV3DMainWindow(QMainWindow):
 
         csv_or_json_keys = [
             "facet_positions_file", "optic_parameters_file", "facet_normals_file", "facet_sizes_file",
-            "interfacet_angles_file", "sensitivity_acuity_file", "optical_summary_file",
+            "interfacet_angles_file", "sampling_acuity_file", "optical_summary_file",
             "landmark_referenced_coordinates_file", "global_aligned_pointcloud_file", "global_coordinates_file",
             "global_rotation_matrix_file", "global_coordinate_metadata_file", "corneal_projections_file"
         ]
@@ -8683,7 +9170,7 @@ class CV3DMainWindow(QMainWindow):
             "metadata_json": f"{export_folder}/06_{cv_id}_export_metadata.json",
             "export_manifest": f"{export_folder}/06_{cv_id}_export_manifest.csv",
             "optic_barplots_png": f"{export_folder}/06_{cv_id}_optic_parameter_summary_barplots.png",
-            "cp_latlon_png": f"{export_folder}/06_{cv_id}_corneal_projection_latlon_CPD.png",
+            "cp_view_angles_png": f"{export_folder}/06_{cv_id}_corneal_projection_view_angles_acuity.png",
             "qc_pdf_report": f"{export_folder}/06_{cv_id}_analysis_ready_export_QC_report.pdf",
             "html_report": f"{export_folder}/06_{cv_id}_analysis_ready_export_QC_report.html",
             "parameter_summary": f"{export_folder}/06_{cv_id}_parameter_summary.csv",
@@ -8829,6 +9316,34 @@ class CV3DMainWindow(QMainWindow):
             return {"min": "", "max": ""}
         return {"min": f"{min(vals):.10g}", "max": f"{max(vals):.10g}"}
 
+    def circular_interval_from_rows(self, rows: List[Dict[str, Any]], column: str = "azimuth") -> Dict[str, str]:
+        vals: List[float] = []
+        for row in rows:
+            try:
+                value = float(row.get(column, ""))
+                if value == value:
+                    vals.append(value % 360.0)
+            except Exception:
+                pass
+        if not vals:
+            return {"start": "", "end": "", "span_deg": ""}
+        vals = sorted(vals)
+        if len(vals) == 1:
+            angle = ((vals[0] + 180.0) % 360.0) - 180.0
+            return {"start": f"{angle:.10g}", "end": f"{angle:.10g}", "span_deg": "0"}
+        gaps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
+        gaps.append(vals[0] + 360.0 - vals[-1])
+        gap_index = max(range(len(gaps)), key=gaps.__getitem__)
+        start360 = vals[(gap_index + 1) % len(vals)]
+        end360 = vals[gap_index]
+        span = 360.0 - gaps[gap_index]
+        to_signed = lambda a: ((a + 180.0) % 360.0) - 180.0
+        return {
+            "start": f"{to_signed(start360):.10g}",
+            "end": f"{to_signed(end360):.10g}",
+            "span_deg": f"{span:.10g}",
+        }
+
     def collect_analysis_ready_rows(self) -> List[Dict[str, Any]]:
         cv_id = self.config["dataset_identity"]["cv_id"]
         rows: List[Dict[str, Any]] = []
@@ -8838,7 +9353,7 @@ class CV3DMainWindow(QMainWindow):
             global_rows = [r for r in self.read_csv_rows_rel(files.get("global_coordinates_file")) if self.is_facet_row(r)]
             facet_size = self.index_by_facet(self.read_csv_rows_rel(files.get("facet_sizes_file")))
             interfacet = self.index_by_facet(self.read_csv_rows_rel(files.get("interfacet_angles_file")))
-            sensitivity = self.index_by_facet(self.read_csv_rows_rel(files.get("sensitivity_acuity_file")))
+            sampling_acuity = self.index_by_facet(self.read_csv_rows_rel(files.get("sampling_acuity_file")))
             optic = self.index_by_facet(self.read_csv_rows_rel(files.get("optic_parameters_file")))
             cp = self.index_by_facet(self.read_csv_rows_rel(files.get("corneal_projections_file")))
             for grow in global_rows:
@@ -8847,7 +9362,8 @@ class CV3DMainWindow(QMainWindow):
                     continue
                 size_row = facet_size.get(fid) or optic.get(fid) or grow
                 angle_row = interfacet.get(fid) or optic.get(fid) or grow
-                sens_row = sensitivity.get(fid) or optic.get(fid) or grow
+                optics_row = sampling_acuity.get(fid) or optic.get(fid) or grow
+                normal_row = optic.get(fid) or grow
                 cp_row = cp.get(fid) or {}
                 out = {
                     "cv_id": cv_id,
@@ -8863,20 +9379,29 @@ class CV3DMainWindow(QMainWindow):
                     "norm.x_global": self.numeric_or_blank(self.first_existing_value(grow, ["norm.x_global", "norm.x", "normal_x", "nx"])),
                     "norm.y_global": self.numeric_or_blank(self.first_existing_value(grow, ["norm.y_global", "norm.y", "normal_y", "ny"])),
                     "norm.z_global": self.numeric_or_blank(self.first_existing_value(grow, ["norm.z_global", "norm.z", "normal_z", "nz"])),
-                    "facet_size_um": self.numeric_or_blank(self.first_existing_value(size_row, ["facet_size_um", "size", "facet_size", "diameter_um", "facet_diameter_um"])),
+                    "facet_size_um": self.numeric_or_blank(self.first_existing_value(size_row, ["facet_size_um", "facet_size_smoothed", "facet_size", "size", "diameter_um", "facet_diameter_um"])),
                     "interfacet_angle_deg": self.numeric_or_blank(self.first_existing_value(angle_row, ["interfacet_angle_deg", "delta_phi.deg", "delta_phi_deg", "angle_deg", "interfacet_angle"])),
-                    "sensitivity": self.numeric_or_blank(self.first_existing_value(sens_row, ["sensitivity", "P", "P_corr", "sensitivity_corr"])),
-                    "CPD": self.numeric_or_blank(self.first_existing_value(sens_row, ["CPD", "CPD_corr", "cpd", "acuity", "acuity_cpd"])),
+                    "eye_parameter": self.numeric_or_blank(self.first_existing_value(optics_row, ["eye_parameter", "sensitivity", "P", "P_corr", "sensitivity_corr"])),
+                    "sampling_frequency_rad": self.numeric_or_blank(self.first_existing_value(optics_row, ["sampling_frequency_rad", "sampling_frequency"])),
+                    "sampling_lattice": str(self.first_existing_value(optics_row, ["sampling_lattice", "lattice"])),
+                    "acuity_cpd": self.numeric_or_blank(self.first_existing_value(optics_row, ["acuity_cpd", "CPD", "CPD_corr", "cpd", "acuity"])),
+                    "facet_normal_method": str(self.first_existing_value(normal_row, ["normal_method", "facet_normal_method"])),
+                    "facet_normal_envelope_factor": self.numeric_or_blank(self.first_existing_value(normal_row, ["normal_envelope_factor", "facet_normal_envelope_factor"])),
+                    "facet_normal_support_scale_um": self.numeric_or_blank(self.first_existing_value(normal_row, ["normal_support_scale_um", "facet_normal_support_scale_um"])),
+                    "facet_normal_weight_cutoff_um": self.numeric_or_blank(self.first_existing_value(normal_row, ["normal_weight_cutoff_um", "facet_normal_weight_cutoff_um"])),
+                    "facet_normal_support_face_count": self.numeric_or_blank(self.first_existing_value(normal_row, ["normal_support_face_count", "facet_normal_support_face_count"])),
                     "corn.proj.x": self.numeric_or_blank(self.first_existing_value(cp_row, ["corn.proj.x", "corn_proj_x", "projection_x"])),
                     "corn.proj.y": self.numeric_or_blank(self.first_existing_value(cp_row, ["corn.proj.y", "corn_proj_y", "projection_y"])),
                     "corn.proj.z": self.numeric_or_blank(self.first_existing_value(cp_row, ["corn.proj.z", "corn_proj_z", "projection_z"])),
-                    "latitude": self.numeric_or_blank(self.first_existing_value(cp_row, ["latitude", "lat"])),
-                    "longitude": self.numeric_or_blank(self.first_existing_value(cp_row, ["longitude", "lon", "long"])),
+                    "elevation": self.numeric_or_blank(self.first_existing_value(cp_row, ["elevation", "latitude", "lat"])),
+                    "azimuth": self.numeric_or_blank(self.first_existing_value(cp_row, ["azimuth", "longitude", "lon", "long"])),
                     "projection_sphere_center_x": self.numeric_or_blank(self.first_existing_value(cp_row, ["projection_sphere_center_x", "sphere_center_x"])),
                     "projection_sphere_center_y": self.numeric_or_blank(self.first_existing_value(cp_row, ["projection_sphere_center_y", "sphere_center_y"])),
                     "projection_sphere_center_z": self.numeric_or_blank(self.first_existing_value(cp_row, ["projection_sphere_center_z", "sphere_center_z"])),
                     "projection_sphere_radius_um": self.numeric_or_blank(self.first_existing_value(cp_row, ["projection_sphere_radius_um", "sphere_radius_um"])),
                     "projection_center_mode": str(self.first_existing_value(cp_row, ["projection_center_mode", "center_mode"])),
+                    "projection_center_source": str(self.first_existing_value(cp_row, ["projection_center_source"])),
+                    "projection_sphere_size_cm": self.numeric_or_blank(self.first_existing_value(cp_row, ["projection_sphere_size_cm"])),
                 }
                 rows.append(out)
         return rows
@@ -8897,20 +9422,21 @@ class CV3DMainWindow(QMainWindow):
                 "mirrored_from_eye": info.get("mirrored_from_eye", ""),
                 "mirror_plane": info.get("mirror_plane", ""),
                 "n_missing_coordinates": str(sum(1 for r in rows if not all(r.get(c) not in (None, "") for c in ["x_global", "y_global", "z_global"]))),
-                "n_missing_optic_values": str(sum(1 for r in rows if not all(r.get(c) not in (None, "") for c in ["facet_size_um", "interfacet_angle_deg", "sensitivity", "CPD"]))),
-                "n_missing_CP_values": str(sum(1 for r in rows if not all(r.get(c) not in (None, "") for c in ["corn.proj.x", "corn.proj.y", "corn.proj.z", "latitude", "longitude"]))),
+                "n_missing_optic_values": str(sum(1 for r in rows if not all(r.get(c) not in (None, "") for c in ["facet_size_um", "interfacet_angle_deg", "eye_parameter", "acuity_cpd"]))),
+                "n_missing_CP_values": str(sum(1 for r in rows if not all(r.get(c) not in (None, "") for c in ["corn.proj.x", "corn.proj.y", "corn.proj.z", "elevation", "azimuth"]))),
             }
-            for col, prefix in [("facet_size_um", "facet_size_um"), ("interfacet_angle_deg", "interfacet_angle_deg"), ("sensitivity", "sensitivity"), ("CPD", "CPD")]:
+            for col, prefix in [("facet_size_um", "facet_size_um"), ("interfacet_angle_deg", "interfacet_angle_deg"), ("eye_parameter", "eye_parameter"), ("sampling_frequency_rad", "sampling_frequency_rad"), ("acuity_cpd", "acuity_cpd")]:
                 st = self.stats_from_rows(rows, col)
                 row[f"mean_{prefix}"] = st["mean"]
                 row[f"median_{prefix}"] = st["median"]
                 row[f"sd_{prefix}"] = st["sd"]
-            lat_range = self.range_from_rows(rows, "latitude")
-            lon_range = self.range_from_rows(rows, "longitude")
-            row["latitude_min"] = lat_range["min"]
-            row["latitude_max"] = lat_range["max"]
-            row["longitude_min"] = lon_range["min"]
-            row["longitude_max"] = lon_range["max"]
+            elevation_range = self.range_from_rows(rows, "elevation")
+            azimuth_interval = self.circular_interval_from_rows(rows, "azimuth")
+            row["elevation_min"] = elevation_range["min"]
+            row["elevation_max"] = elevation_range["max"]
+            row["azimuth_start"] = azimuth_interval["start"]
+            row["azimuth_end"] = azimuth_interval["end"]
+            row["azimuth_span_deg"] = azimuth_interval["span_deg"]
             summary_rows.append(row)
         return summary_rows
 
@@ -8923,10 +9449,12 @@ class CV3DMainWindow(QMainWindow):
         fieldnames = [
             "cv_id", "eye", "facet_id", "data_origin", "mirrored", "mirrored_from_eye", "mirror_plane",
             "x_global", "y_global", "z_global", "norm.x_global", "norm.y_global", "norm.z_global",
-            "facet_size_um", "interfacet_angle_deg", "sensitivity", "CPD",
-            "corn.proj.x", "corn.proj.y", "corn.proj.z", "latitude", "longitude",
+            "facet_size_um", "interfacet_angle_deg", "eye_parameter", "sampling_frequency_rad", "sampling_lattice", "acuity_cpd",
+            "facet_normal_method", "facet_normal_envelope_factor", "facet_normal_support_scale_um",
+            "facet_normal_weight_cutoff_um", "facet_normal_support_face_count",
+            "corn.proj.x", "corn.proj.y", "corn.proj.z", "elevation", "azimuth",
             "projection_sphere_center_x", "projection_sphere_center_y", "projection_sphere_center_z",
-            "projection_sphere_radius_um", "projection_center_mode",
+            "projection_sphere_radius_um", "projection_sphere_size_cm", "projection_center_mode", "projection_center_source",
         ]
         write_csv(self.analysis_folder / out["analysis_ready_table"]["file"], fieldnames, facet_rows)
         created.append(out["analysis_ready_table"]["file"])
@@ -8935,14 +9463,16 @@ class CV3DMainWindow(QMainWindow):
             "cv_id", "eye_scope", "n_facets", "is_real_eye", "is_mirrored_eye", "mirrored_from_eye", "mirror_plane",
             "mean_facet_size_um", "median_facet_size_um", "sd_facet_size_um",
             "mean_interfacet_angle_deg", "median_interfacet_angle_deg", "sd_interfacet_angle_deg",
-            "mean_sensitivity", "median_sensitivity", "sd_sensitivity",
-            "mean_CPD", "median_CPD", "sd_CPD",
-            "latitude_min", "latitude_max", "longitude_min", "longitude_max",
+            "mean_eye_parameter", "median_eye_parameter", "sd_eye_parameter",
+            "mean_sampling_frequency_rad", "median_sampling_frequency_rad", "sd_sampling_frequency_rad",
+            "mean_acuity_cpd", "median_acuity_cpd", "sd_acuity_cpd",
+            "elevation_min", "elevation_max", "azimuth_start", "azimuth_end", "azimuth_span_deg",
             "n_missing_coordinates", "n_missing_optic_values", "n_missing_CP_values",
         ]
         write_csv(self.analysis_folder / out["eye_summary"]["file"], summary_fields, summary_rows)
         write_csv(self.analysis_folder / out["specimen_summary"]["file"], summary_fields, [r for r in summary_rows if r.get("eye_scope") == "both_eyes"])
         created.extend([out["eye_summary"]["file"], out["specimen_summary"]["file"]])
+        normal_defaults = self.config.get("parameters", {}).get("dataset_defaults", {})
         metadata = {
             "cv_id": cv_id,
             "created": now(),
@@ -8951,7 +9481,12 @@ class CV3DMainWindow(QMainWindow):
             "active_export_eyes": self.active_export_eyes(),
             "facet_rows": len(facet_rows),
             "summary_rows": len(summary_rows),
-            "notes": "CV3D analysis-ready export. CPD is exported under the exact column name CPD.",
+            "spatial_unit": "um",
+            "eye_parameter_unit": "um*rad",
+            "cp_sphere_user_unit": "cm",
+            "facet_normal_default_method": normal_defaults.get("facet_normal_method", "envelope"),
+            "facet_normal_default_envelope_factor": normal_defaults.get("facet_normal_envelope_factor", 1.25),
+            "notes": "CV3D assumes mesh and point-cloud coordinates are in micrometres. acuity_cpd is a local anatomical estimate in cycles per degree.",
         }
         write_json(self.analysis_folder / out["metadata_json"]["file"], metadata)
         created.append(out["metadata_json"]["file"])
@@ -9041,7 +9576,7 @@ class CV3DMainWindow(QMainWindow):
 
             task_prefix = "06RGL"
             output_pngs = {axis: str(export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_{axis}.png") for axis in ["front", "back", "left", "right", "top", "bottom"]}
-            output_pngs["latlon"] = str(export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_latlon.png")
+            output_pngs["view_angles"] = str(export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_view_angles.png")
             output_pngs["rgl_3d"] = str(export_folder / f"06_{cv_id}_{scope}_05C_corneal_projection_3d_qc.png")
             task_rel = eye_json_rel_path(active[0] if active else "eye1", f"{task_prefix}_{cv_id}_{scope}_R_task.json")
             status_rel = eye_json_rel_path(active[0] if active else "eye1", f"{task_prefix}_{cv_id}_{scope}_R_status.json")
@@ -9075,7 +9610,7 @@ class CV3DMainWindow(QMainWindow):
             cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
             try:
                 with (self.analysis_folder / stdout_rel).open("w", encoding="utf-8", errors="replace") as out, (self.analysis_folder / stderr_rel).open("w", encoding="utf-8", errors="replace") as err:
-                    result = subprocess.run(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                    result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
                 if result.returncode == 0 and Path(output_pngs["rgl_3d"]).exists():
                     messages.append(f"Fresh 05C rgl snapshot created for {scope}: {Path(output_pngs['rgl_3d']).name}")
                 else:
@@ -9319,8 +9854,8 @@ class CV3DMainWindow(QMainWindow):
             s = min(w, h)
             return (x0 + (w - s) / 2.0, y0 + (h - s) / 2.0, s, s)
 
-        def latlon_plot_area(x0, y0, w, h):
-            # Longitude range is twice the latitude range, so equal degree units need a 2:1 panel.
+        def view_angle_plot_area(x0, y0, w, h):
+            # Azimuth range is twice the elevation range, so equal degree units need a 2:1 panel.
             desired = 2.0
             available = w / h
             if available > desired:
@@ -9426,7 +9961,7 @@ class CV3DMainWindow(QMainWindow):
                 xv = to_float(row, xkey); yv = to_float(row, ykey)
                 if xv is None or yv is None:
                     continue
-                sv = to_float(row, 'size')
+                sv = to_float(row, 'facet_size_smoothed')
                 facet_pts.append((xv, yv, sv, row.get('source_eye', 'eye1')))
                 xs.append(xv); ys.append(yv)
                 if sv is not None: vals.append(sv)
@@ -9489,7 +10024,7 @@ class CV3DMainWindow(QMainWindow):
         def optic_barplots_page():
             cmds = new_page('05A optic-parameter summaries', 'Eye-wise means and counts from analysis-ready export tables')
             eye_rows = [r for r in summary_rows if r.get('eye_scope') in EYES]
-            metrics = [('n_facets', 'Facet count'), ('mean_facet_size_um', 'Mean facet size (um)'), ('mean_interfacet_angle_deg', 'Mean interfacet angle (deg)'), ('mean_CPD', 'Mean CPD'), ('mean_sensitivity', 'Mean sensitivity')]
+            metrics = [('n_facets', 'Facet count'), ('mean_facet_size_um', 'Mean facet size (µm)'), ('mean_interfacet_angle_deg', 'Mean interfacet angle (deg)'), ('mean_acuity_cpd', 'Mean acuity (cpd)'), ('mean_eye_parameter', 'Mean eye parameter')]
             left, plot_w, top, plot_h, gap = 68, 420, 735, 86, 22
             labels = [r.get('eye_scope', '') for r in eye_rows]
             for mi, (col, label) in enumerate(metrics):
@@ -9520,7 +10055,7 @@ class CV3DMainWindow(QMainWindow):
             cmds = new_page('05A optic-parameter distributions', 'Eye1 and eye2 shown as paired histograms')
             rows1 = [r for r in facet_rows if r.get('eye') == 'eye1']
             rows2 = [r for r in facet_rows if r.get('eye') == 'eye2']
-            panels = [('facet_size_um', 'Facet size'), ('interfacet_angle_deg', 'Interfacet angle'), ('CPD', 'CPD'), ('sensitivity', 'Sensitivity')]
+            panels = [('facet_size_um', 'Facet size'), ('interfacet_angle_deg', 'Interfacet angle'), ('acuity_cpd', 'Acuity (cpd)'), ('eye_parameter', 'Eye parameter')]
             positions = [(50, 450), (315, 450), (50, 150), (315, 150)]
             for (key, title), (x, y) in zip(panels, positions):
                 draw_hist_panel(cmds, rows1, rows2, key, title, x, y, 220, 180)
@@ -9530,24 +10065,24 @@ class CV3DMainWindow(QMainWindow):
 
         def cp_view_points(rows, view_name):
             view_defs = {
-                'front': ('corn.proj.x', 'corn.proj.z', 'x_global', 'z_global', 1, 1, 'x (um)', 'z (um)'),
-                'back': ('corn.proj.x', 'corn.proj.z', 'x_global', 'z_global', -1, 1, '-x (um)', 'z (um)'),
-                'left': ('corn.proj.y', 'corn.proj.z', 'y_global', 'z_global', 1, 1, 'y (um)', 'z (um)'),
-                'right': ('corn.proj.y', 'corn.proj.z', 'y_global', 'z_global', -1, 1, '-y (um)', 'z (um)'),
-                'top': ('corn.proj.x', 'corn.proj.y', 'x_global', 'y_global', 1, 1, 'x (um)', 'y (um)'),
-                'bottom': ('corn.proj.x', 'corn.proj.y', 'x_global', 'y_global', 1, -1, 'x (um)', '-y (um)'),
+                'front': ('corn.proj.x', 'corn.proj.z', 'x_global', 'z_global', 1, 1, 'x (µm)', 'z (µm)'),
+                'back': ('corn.proj.x', 'corn.proj.z', 'x_global', 'z_global', -1, 1, '-x (µm)', 'z (µm)'),
+                'left': ('corn.proj.y', 'corn.proj.z', 'y_global', 'z_global', 1, 1, 'y (µm)', 'z (µm)'),
+                'right': ('corn.proj.y', 'corn.proj.z', 'y_global', 'z_global', -1, 1, '-y (µm)', 'z (µm)'),
+                'top': ('corn.proj.x', 'corn.proj.y', 'x_global', 'y_global', 1, 1, 'x (µm)', 'y (µm)'),
+                'bottom': ('corn.proj.x', 'corn.proj.y', 'x_global', 'y_global', 1, -1, 'x (µm)', '-y (µm)'),
             }
             pxk, pyk, fxk, fyk, sx, sy, xlab, ylab = view_defs[view_name]
             pts, xvals, yvals = [], [], []
             for row in rows:
                 px = to_float(row, pxk); py = to_float(row, pyk); fx = to_float(row, fxk); fy = to_float(row, fyk)
                 if px is not None and py is not None and fx is not None and fy is not None:
-                    item = {'px': px*sx, 'py': py*sy, 'fx': fx*sx, 'fy': fy*sy, 'val': to_float(row, 'CPD'), 'eye': row.get('eye','eye1'), 'size': to_float(row,'facet_size_um')}
+                    item = {'px': px*sx, 'py': py*sy, 'fx': fx*sx, 'fy': fy*sy, 'val': to_float(row, 'acuity_cpd'), 'eye': row.get('eye','eye1'), 'size': to_float(row,'facet_size_um')}
                     pts.append(item)
                     xvals.extend([item['px'], item['fx']]); yvals.extend([item['py'], item['fy']])
             return pts, xvals, yvals, xlab, ylab
 
-        def draw_cp_projection_panel(cmds, panel_title, rows, view_name, x0, y0, w, h, color_key='CPD'):
+        def draw_cp_projection_panel(cmds, panel_title, rows, view_name, x0, y0, w, h, color_key='acuity_cpd'):
             pts, xvals, yvals, xlab, ylab = cp_view_points(rows, view_name)
             if not pts:
                 cmds.append(text_cmd(x0, y0 + h/2, f"{panel_title}: no data", 9))
@@ -9564,49 +10099,49 @@ class CV3DMainWindow(QMainWindow):
                 fy = py0 + (item['fy'] - ymin) / (ymax - ymin) * ph
                 px = px0 + (item['px'] - xmin) / (xmax - xmin) * pw
                 py = py0 + (item['py'] - ymin) / (ymax - ymin) * ph
-                val = item['val'] if color_key == 'CPD' else item.get('size')
+                val = item['val'] if color_key == 'acuity_cpd' else item.get('size')
                 rgb = rgb_for_value(val, vmin, vmax)
                 draw_marker(cmds, fx, fy, 0.9 if shape_for_eye(item['eye']) == 'triangle' else 0.8, shape_for_eye(item['eye']), rgb)
                 draw_marker(cmds, px, py, 1.4 if shape_for_eye(item['eye']) == 'triangle' else 1.2, shape_for_eye(item['eye']), rgb)
             draw_colorbar(cmds, x0 + w + 8, y0 + 16, h - 32, vmin, vmax, color_key)
 
-        def draw_latlon_panel(cmds, panel_title, rows, x0, y0, w, h, color_key='CPD'):
+        def draw_view_angle_panel(cmds, panel_title, rows, x0, y0, w, h, color_key='acuity_cpd'):
             plot_rows = []
             for row in rows:
-                lon = to_float(row, 'longitude'); lat = to_float(row, 'latitude')
-                if lon is not None and lat is not None:
-                    plot_rows.append((lon, lat, row))
+                azimuth = to_float(row, 'azimuth'); elevation = to_float(row, 'elevation')
+                if azimuth is not None and elevation is not None:
+                    plot_rows.append((azimuth, elevation, row))
             if not plot_rows:
                 cmds.append(text_cmd(x0, y0 + h/2, f"{panel_title}: no data", 9))
                 return
             xmin, xmax, ymin, ymax = -180, 180, -90, 90
-            px0, py0, pw, ph = latlon_plot_area(x0, y0, w, h)
-            draw_axes_frame(cmds, px0, py0, pw, ph, xlabel='longitude (deg)', ylabel='latitude (deg)', xbounds=(xmin,xmax), ybounds=(ymin,ymax), xticks=[-180,-90,0,90,180], yticks=[-90,-45,0,45,90], grid=True)
+            px0, py0, pw, ph = view_angle_plot_area(x0, y0, w, h)
+            draw_axes_frame(cmds, px0, py0, pw, ph, xlabel='azimuth (deg)', ylabel='elevation (deg)', xbounds=(xmin,xmax), ybounds=(ymin,ymax), xticks=[-180,-90,0,90,180], yticks=[-90,-45,0,45,90], grid=True)
             cmds.append(text_cmd(x0, y0 + h + 10, panel_title, 9, 'F2'))
             vals = [to_float(r, color_key) for _,_,r in plot_rows if to_float(r, color_key) is not None]
             vmin, vmax = (min(vals), max(vals)) if vals else (0.0, 1.0)
             if vmax <= vmin: vmax = vmin + 1.0
-            for lon, lat, row in plot_rows[::max(1, len(plot_rows)//2500)]:
-                px = px0 + (lon - xmin)/(xmax-xmin) * pw
-                py = py0 + (lat - ymin)/(ymax-ymin) * ph
+            for azimuth, elevation, row in plot_rows[::max(1, len(plot_rows)//2500)]:
+                px = px0 + (azimuth - xmin)/(xmax-xmin) * pw
+                py = py0 + (elevation - ymin)/(ymax-ymin) * ph
                 val = to_float(row, color_key)
                 draw_marker(cmds, px, py, 1.4 if shape_for_eye(row.get('eye')) == 'triangle' else 1.2, shape_for_eye(row.get('eye')), rgb_for_value(val, vmin, vmax))
             draw_colorbar(cmds, x0 + w + 8, y0 + 16, h - 32, vmin, vmax, color_key)
 
         def cp_scope_page(scope_rows, scope_label):
             cmds = new_page(f'05C corneal-projection QC: {scope_label}', '2D projection panels with equal axis units')
-            draw_latlon_panel(cmds, f'{scope_label}: latitude / longitude coloured by CPD', scope_rows, 42, 470, 250, 150, 'CPD')
-            draw_cp_projection_panel(cmds, f'{scope_label}: front view', scope_rows, 'front', 330, 480, 175, 175, 'CPD')
-            draw_cp_projection_panel(cmds, f'{scope_label}: side view', scope_rows, 'left', 70, 140, 175, 175, 'CPD')
-            draw_cp_projection_panel(cmds, f'{scope_label}: top view', scope_rows, 'top', 330, 140, 175, 175, 'CPD')
+            draw_view_angle_panel(cmds, f'{scope_label}: elevation / azimuth coloured by acuity', scope_rows, 42, 470, 250, 150, 'acuity_cpd')
+            draw_cp_projection_panel(cmds, f'{scope_label}: front view', scope_rows, 'front', 330, 480, 175, 175, 'acuity_cpd')
+            draw_cp_projection_panel(cmds, f'{scope_label}: side view', scope_rows, 'left', 70, 140, 175, 175, 'acuity_cpd')
+            draw_cp_projection_panel(cmds, f'{scope_label}: top view', scope_rows, 'top', 330, 140, 175, 175, 'acuity_cpd')
             return cmds
 
-        def latlon_metric_maps_page():
-            cmds = new_page('Additional optic parameter maps', 'Combined eye latitude/longitude maps coloured by analysis-ready metrics')
-            metrics = [('facet_size_um', 'Facet size'), ('interfacet_angle_deg', 'Interfacet angle'), ('CPD', 'CPD'), ('sensitivity', 'Sensitivity')]
+        def view_angle_metric_maps_page():
+            cmds = new_page('Additional optic parameter maps', 'Combined-eye elevation/azimuth maps coloured by analysis-ready metrics')
+            metrics = [('facet_size_um', 'Facet size'), ('interfacet_angle_deg', 'Interfacet angle'), ('acuity_cpd', 'Acuity (cpd)'), ('eye_parameter', 'Eye parameter')]
             positions = [(42, 495), (305, 495), (42, 170), (305, 170)]
             for (key, title), (x, y) in zip(metrics, positions):
-                draw_latlon_panel(cmds, title, facet_rows, x, y, 220, 130, key)
+                draw_view_angle_panel(cmds, title, facet_rows, x, y, 220, 130, key)
             return cmds
 
         def cp_report_pages():
@@ -9755,8 +10290,8 @@ class CV3DMainWindow(QMainWindow):
         pages.append(readiness)
 
         if getattr(self, 'report_include_summary_table', None) is None or self.report_include_summary_table.isChecked():
-            cols = ['eye_scope', 'n_facets', 'mean_facet_size_um', 'mean_interfacet_angle_deg', 'mean_CPD', 'mean_sensitivity', 'latitude_min', 'latitude_max', 'longitude_min', 'longitude_max']
-            widths = [58, 44, 58, 66, 42, 54, 48, 48, 48, 48]
+            cols = ['eye_scope', 'n_facets', 'mean_facet_size_um', 'mean_interfacet_angle_deg', 'mean_acuity_cpd', 'mean_eye_parameter', 'elevation_min', 'elevation_max', 'azimuth_start', 'azimuth_end', 'azimuth_span_deg']
+            widths = [48, 38, 52, 58, 50, 54, 42, 42, 42, 42, 46]
             pages.append(table_page('Specimen and eye summary', summary_rows, cols, widths=widths, max_rows=12))
 
         if getattr(self, 'report_include_optic_barplots', None) is None or self.report_include_optic_barplots.isChecked():
@@ -9771,7 +10306,7 @@ class CV3DMainWindow(QMainWindow):
             pages.extend(rgl_snapshot_pages())
 
         if getattr(self, 'report_include_downstream_examples', None) is not None and self.report_include_downstream_examples.isChecked():
-            pages.append(latlon_metric_maps_page())
+            pages.append(view_angle_metric_maps_page())
 
         build_pdf(pdf_path, pages)
 
@@ -9896,7 +10431,7 @@ class CV3DMainWindow(QMainWindow):
             files = self.config["eyes"][eye]["files"]
             selected = files.get("selected_raw_stl_file")
             if not selected:
-                return [f"No selected raw STL for {eye}. Run dummy ImageJ preprocessing or add an external STL first."]
+                return [f"No selected raw STL for {eye}. Run ImageJ preprocessing or add an external STL first."]
             selected_path = self.analysis_folder / selected
             if not selected_path.exists():
                 return [f"Selected raw STL is missing on disk: {selected}"]

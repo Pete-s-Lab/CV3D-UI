@@ -16,7 +16,7 @@ safe_require("dplyr")
 safe_require("tibble")
 safe_require("CV3D")
 
-SCRIPT_VERSION <- "0.1.1-stepwise-numeric-internal-ids"
+SCRIPT_VERSION <- "0.1.3-selectable-envelope-normals"
 SCRIPT_NAME <- "CV3D_R_05A_optics.R"
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
@@ -109,58 +109,98 @@ main <- function() {
   if (!is.finite(cores) || cores < 1) cores <- 1L
 
   edge_tol <- as.numeric(task$parameters$edge_tol %||% 0.5)
-  if (!is.finite(edge_tol) || edge_tol <= 0) edge_tol <- 0.5
+  if (!is.finite(edge_tol) || edge_tol < 0) edge_tol <- 0.5
 
   facet_size <- as.numeric(task$parameters$facet_size_estimate %||% 14)
   if (!is.finite(facet_size) || facet_size <= 0) facet_size <- 14
+
+  lattice <- tolower(as.character(task$parameters$lattice %||% "hexagonal"))
+  if (!lattice %in% c("hexagonal", "square")) {
+    stop("lattice must be either 'hexagonal' or 'square'.", call. = FALSE)
+  }
+
+  normal_method <- tolower(as.character(task$parameters$normal_method %||% "envelope"))
+  if (!normal_method %in% c("original", "envelope")) {
+    stop("normal_method must be either 'original' or 'envelope'.", call. = FALSE)
+  }
+  normal_envelope_factor <- suppressWarnings(as.numeric(task$parameters$normal_envelope_factor %||% 1.25))
+  if (normal_method == "envelope") {
+    if (!is.finite(normal_envelope_factor) || !normal_envelope_factor %in% c(1, 1.25, 1.5, 2)) {
+      stop("normal_envelope_factor must be one of 1, 1.25, 1.5, or 2 for envelope normals.", call. = FALSE)
+    }
+  } else {
+    normal_envelope_factor <- NA_real_
+  }
 
   message("Calculating optical metrics stepwise with CV3D package functions.")
   message("Facet count: ", nrow(facet_df))
   message("Edge tolerance: ", edge_tol)
   message("Cores: ", cores)
   message("Facet-size estimate: ", facet_size)
+  message("Sampling lattice: ", lattice)
+  if (normal_method == "original") {
+    message("Facet-normal method: original CV3D.")
+  } else {
+    message("Facet-normal method: regularised facet-centre envelope; factor=", normal_envelope_factor)
+  }
 
-  message("Step 05A.1: find_neighbours().")
+  message("Step 05A.1: find_neighbours() using local tangent-plane geometry.")
   neighbours <- CV3D::find_neighbours(
     df = facet_df,
     edge_tol = edge_tol
   )
 
   if (!"ID" %in% names(neighbours)) stop("find_neighbours() output has no ID column.", call. = FALSE)
-  if ("number.of.neighbours" %in% names(neighbours) && all(neighbours$number.of.neighbours < 2, na.rm = TRUE)) {
+  if ("number_of_neighbours" %in% names(neighbours) && all(neighbours$number_of_neighbours < 2, na.rm = TRUE)) {
     stop("All facets have fewer than two neighbours after find_neighbours(); cannot calculate facet normals.", call. = FALSE)
   }
 
   message("Step 05A.2: calculate_facet_size().")
   facet_sizes_raw <- CV3D::calculate_facet_size(neighbours)
 
-  df_w_sizes_raw <- neighbours %>%
-    dplyr::left_join(
-      facet_sizes_raw %>% dplyr::select(-dplyr::any_of("n_used")),
-      by = "ID"
-    )
+  df_w_sizes <- neighbours %>%
+    dplyr::left_join(facet_sizes_raw, by = "ID")
 
-  if ("size_avg" %in% names(df_w_sizes_raw)) {
-    df_w_sizes <- df_w_sizes_raw %>%
-      dplyr::select(-dplyr::any_of("size")) %>%
-      dplyr::rename(size = size_avg)
-  } else if ("size" %in% names(df_w_sizes_raw)) {
-    df_w_sizes <- df_w_sizes_raw
-  } else {
-    warning("calculate_facet_size() returned no size/size_avg column; using facet-size estimate for all facets.")
-    df_w_sizes <- df_w_sizes_raw %>% dplyr::mutate(size = facet_size)
+  if (!"facet_size_smoothed" %in% names(df_w_sizes)) {
+    warning("calculate_facet_size() returned no facet_size_smoothed column; using facet-size estimate for all facets.")
+    df_w_sizes$facet_size_smoothed <- facet_size
+  }
+  if (!"facet_size" %in% names(df_w_sizes)) {
+    df_w_sizes$facet_size <- df_w_sizes$facet_size_smoothed
   }
 
-  message("Step 05A.3: get_facet_normals().")
-  normals <- CV3D::get_facet_normals(
-    df = df_w_sizes,
-    cores = cores,
-    plot_file = NULL,
-    plot_results = FALSE,
-    verbose = TRUE
-  )
+  if (normal_method == "original") {
+    message("Step 05A.3: get_facet_normals() — original CV3D estimator.")
+    normals <- CV3D::get_facet_normals(
+      df = df_w_sizes,
+      cores = cores,
+      plot_file = NULL,
+      plot_results = FALSE,
+      verbose = FALSE
+    ) %>%
+      dplyr::mutate(
+        normal_method = "original",
+        normal_envelope_factor = NA_real_,
+        normal_support_scale_um = NA_real_,
+        normal_weight_cutoff_um = NA_real_,
+        normal_support_face_count = NA_integer_
+      )
+  } else {
+    if (!"get_facet_normals_envelope" %in% getNamespaceExports("CV3D")) {
+      stop(
+        "The installed CV3D package does not provide get_facet_normals_envelope(). Update the package before using envelope normals.",
+        call. = FALSE
+      )
+    }
+    message("Step 05A.3: get_facet_normals_envelope() — regularised facet-centre envelope.")
+    normals <- CV3D::get_facet_normals_envelope(
+      df = df_w_sizes,
+      envelope_factor = normal_envelope_factor,
+      verbose = FALSE
+    )
+  }
 
-  if (!"ID" %in% names(normals)) stop("get_facet_normals() output has no ID column.", call. = FALSE)
+  if (!"ID" %in% names(normals)) stop("Facet-normal output has no ID column.", call. = FALSE)
 
   # Avoid accidental duplicate coordinate columns from package internals.
   normal_cols <- c("ID", setdiff(names(normals), names(df_w_sizes)))
@@ -171,10 +211,11 @@ main <- function() {
   message("Step 05A.4: get_optic_properties().")
   optic_properties <- CV3D::get_optic_properties(
     df = df_w_normals,
+    lattice = lattice,
     cores = cores,
     plot_results = FALSE,
     plot_file = NULL,
-    verbose = TRUE
+    verbose = FALSE
   )
 
   if (!"ID" %in% names(optic_properties)) stop("get_optic_properties() output has no ID column.", call. = FALSE)
@@ -198,45 +239,57 @@ main <- function() {
   # Separate outputs, all keyed by the same facet_id exported from Blender.
   facet_sizes <- select_existing(
     optic,
-    c("cv_id", "eye", "facet_id", "internal_ID", "x", "y", "z", "size", "number.of.neighbours", "neighbours")
+    c("cv_id", "eye", "facet_id", "internal_ID", "x", "y", "z", "facet_size", "facet_size_smoothed", "number_of_neighbours", "neighbours")
   )
 
   interfacet_angles <- select_existing(
     optic,
-    c("cv_id", "eye", "facet_id", "internal_ID", "delta_phi.deg", "delta_phi.rad", "number.of.neighbours", "neighbours")
+    c("cv_id", "eye", "facet_id", "internal_ID", "interfacet_angle_deg", "interfacet_angle_rad", "number_of_neighbours", "neighbours")
   )
 
-  sensitivity_acuity <- select_existing(
+  sampling_acuity <- select_existing(
     optic,
-    c("cv_id", "eye", "facet_id", "internal_ID", "P", "v", "CPD")
+    c("cv_id", "eye", "facet_id", "internal_ID", "sampling_lattice", "eye_parameter", "sampling_frequency_rad", "acuity_cpd")
   )
 
   facet_normals <- select_existing(
     optic,
-    c("cv_id", "eye", "facet_id", "internal_ID", "x", "y", "z", "norm.x", "norm.y", "norm.z")
+    c(
+      "cv_id", "eye", "facet_id", "internal_ID", "x", "y", "z",
+      "norm.x", "norm.y", "norm.z",
+      "normal_method", "normal_envelope_factor", "normal_support_scale_um",
+      "normal_weight_cutoff_um", "normal_support_face_count"
+    )
   )
 
   numeric_summary <- tibble::tibble(
     cv_id = task$cv_id,
     eye = task$eye,
     facet_count = nrow(optic),
-    mean_facet_size = safe_mean(optic, "size"),
-    median_facet_size = safe_median(optic, "size"),
-    mean_delta_phi_deg = safe_mean(optic, "delta_phi.deg"),
-    median_delta_phi_deg = safe_median(optic, "delta_phi.deg"),
-    mean_P = safe_mean(optic, "P"),
-    mean_v = safe_mean(optic, "v"),
-    mean_CPD = safe_mean(optic, "CPD"),
+    mean_facet_size = safe_mean(optic, "facet_size_smoothed"),
+    median_facet_size = safe_median(optic, "facet_size_smoothed"),
+    mean_delta_phi_deg = safe_mean(optic, "interfacet_angle_deg"),
+    median_delta_phi_deg = safe_median(optic, "interfacet_angle_deg"),
+    mean_eye_parameter = safe_mean(optic, "eye_parameter"),
+    mean_sampling_frequency_rad = safe_mean(optic, "sampling_frequency_rad"),
+    mean_acuity_cpd = safe_mean(optic, "acuity_cpd"),
+    sampling_lattice = lattice,
+    facet_normal_method = normal_method,
+    facet_normal_envelope_factor = if (normal_method == "envelope") normal_envelope_factor else NA_real_,
+    facet_normal_post_neighbour_smoothing = normal_method == "original",
+    neighbour_method = "local_tangent_plane",
     edge_tol = edge_tol,
     cores = cores,
     facet_size_estimate = facet_size,
+    spatial_unit = "um",
+    eye_parameter_unit = "um*rad",
     internal_id_mode = "numeric_internal_ids_blender_facet_id_preserved"
   )
 
   write_csv_safe(optic, task$output_optic_parameters_abs)
   write_csv_safe(facet_sizes, task$output_facet_sizes_abs)
   write_csv_safe(interfacet_angles, task$output_interfacet_angles_abs)
-  write_csv_safe(sensitivity_acuity, task$output_sensitivity_acuity_abs)
+  write_csv_safe(sampling_acuity, task$output_sampling_acuity_abs)
   write_csv_safe(facet_normals, task$output_facet_normals_abs)
   write_csv_safe(numeric_summary, task$output_optical_summary_abs)
 
@@ -247,6 +300,11 @@ main <- function() {
     edge_tol = edge_tol,
     cores = cores,
     facet_size_estimate = facet_size,
+    sampling_lattice = lattice,
+    facet_normal_method = normal_method,
+    facet_normal_envelope_factor = if (normal_method == "envelope") normal_envelope_factor else NA_real_,
+    facet_normal_post_neighbour_smoothing = normal_method == "original",
+    neighbour_method = "local_tangent_plane",
     internal_id_mode = "numeric_internal_ids_blender_facet_id_preserved"
   )))
 }

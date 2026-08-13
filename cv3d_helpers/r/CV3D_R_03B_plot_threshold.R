@@ -16,6 +16,7 @@ safe_require("jsonlite")
 safe_require("readr")
 safe_require("dplyr")
 safe_require("rgl")
+safe_require("CV3D")
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
 status_file <- task$status_file_abs
@@ -61,6 +62,8 @@ main <- function() {
   thresholded_csv <- normalizePath(task$input_local_height_thresholded_abs, winslash = "/", mustWork = TRUE)
   out_png <- task$output_plot_png_abs
   height_column <- task$height_column
+  if (identical(height_column, "local_height_log")) height_column <- "local_height_contrast"
+  if (identical(height_column, "local_height_log_norm")) height_column <- "local_height_norm_contrast"
   open_rgl <- isTRUE(task$open_rgl_window)
 
   dir.create(dirname(out_png), recursive = TRUE, showWarnings = FALSE)
@@ -81,40 +84,117 @@ main <- function() {
   df <- df %>% dplyr::mutate(x = as.numeric(x), y = as.numeric(y), z = as.numeric(z))
   thr <- thr %>% dplyr::mutate(x = as.numeric(x), y = as.numeric(y), z = as.numeric(z))
 
+  # Convert legacy exponentiated height columns to the current 0--1 contrast
+  # scales before plotting older datasets. Legacy colour columns are not reused
+  # because their mapping was defined on the old 1--10/exponentiated scales.
+  if (!"local_height_contrast" %in% names(df)) {
+    legacy_name <- if ("local_height_exp10" %in% names(df)) {
+      "local_height_exp10"
+    } else if ("local_height_log" %in% names(df)) {
+      "local_height_log"
+    } else {
+      NA_character_
+    }
+    legacy_exp <- if (!is.na(legacy_name)) {
+      as.numeric(df[[legacy_name]])
+    } else if ("local_height" %in% names(df)) {
+      10^as.numeric(df$local_height)
+    } else {
+      NULL
+    }
+    if (!is.null(legacy_exp)) {
+      finite <- is.finite(legacy_exp)
+      contrast <- rep(NA_real_, length(legacy_exp))
+      if (any(finite)) {
+        bounds <- stats::quantile(legacy_exp[finite], probs = c(0.5, 0.9), na.rm = TRUE, names = FALSE)
+        clipped <- pmin(pmax(legacy_exp[finite], bounds[1]), bounds[2])
+        contrast[finite] <- if (isTRUE(all.equal(bounds[1], bounds[2]))) {
+          0.5
+        } else {
+          (clipped - bounds[1]) / diff(bounds)
+        }
+      }
+      df$local_height_contrast <- contrast
+    }
+  }
+  if (!"local_height_norm_contrast" %in% names(df)) {
+    legacy_name <- if ("local_height_norm_exp10" %in% names(df)) {
+      "local_height_norm_exp10"
+    } else if ("local_height_log_norm" %in% names(df)) {
+      "local_height_log_norm"
+    } else {
+      NA_character_
+    }
+    if (!is.na(legacy_name)) {
+      df$local_height_norm_contrast <- pmin(pmax((as.numeric(df[[legacy_name]]) - 1) / 9, 0), 1)
+    } else if ("local_height_norm" %in% names(df)) {
+      df$local_height_norm_contrast <- pmin(pmax((10^as.numeric(df$local_height_norm) - 1) / 9, 0), 1)
+    }
+  }
+
   if (height_column %in% names(df)) {
     df$.height_for_col <- as.numeric(df[[height_column]])
   } else {
     df$.height_for_col <- NA_real_
   }
 
-  if (height_column == "local_height_log_norm" && "local_height_log_norm_col" %in% names(df)) {
-    full_col <- df$local_height_log_norm_col
-  } else if (height_column == "local_height_log" && "local_height_log_col" %in% names(df)) {
-    full_col <- df$local_height_log_col
+  if (height_column == "local_height_norm_contrast" && "local_height_norm_contrast_col" %in% names(df)) {
+    full_col <- df$local_height_norm_contrast_col
+  } else if (height_column == "local_height_contrast" && "local_height_contrast_col" %in% names(df)) {
+    full_col <- df$local_height_contrast_col
   } else {
     full_col <- fallback_col(df$.height_for_col)
   }
 
-  message("Opening rgl device...")
-  rgl::open3d(useNULL = FALSE)
+  normal_cols <- c("norm.x", "norm.y", "norm.z")
+  have_normals <- all(normal_cols %in% names(df))
 
-  
-  set_cv3d_rgl_window_size(scale = 3)
-rgl::plot3d(
-    df %>% dplyr::select(x, y, z),
-    aspect = "iso",
-    col = full_col,
-    size = 3,
-    alpha = 0.35
-  )
+  view <- NULL
+  if (have_normals) {
+    view <- CV3D::view_eye_face_on(
+      df,
+      projection = "3D",
+      col = grDevices::adjustcolor(full_col, alpha.f = 0.35),
+      rgl_size = 3,
+      axes = TRUE
+    )
+    set_cv3d_rgl_window_size(scale = 3)
+  } else {
+    message("Surface normals unavailable; using the legacy unconstrained rgl view.")
+    rgl::open3d(useNULL = FALSE)
+    set_cv3d_rgl_window_size(scale = 3)
+    rgl::plot3d(
+      df[, c("x", "y", "z")],
+      aspect = "iso",
+      col = full_col,
+      size = 3,
+      alpha = 0.35
+    )
+  }
 
   if (nrow(thr) > 0) {
-    rgl::points3d(
-      thr %>% dplyr::select(x, y, z),
-      aspect = "iso",
-      col = "red",
-      size = 8
-    )
+    if (have_normals) {
+      # The reference surface is centred for display by view_eye_face_on().
+      # Keep thresholded points in their original position relative to that
+      # surface rather than centring this subset independently.
+      thr_plot <- sweep(
+        as.matrix(thr[, c("x", "y", "z")]),
+        2,
+        view$cloud_centre,
+        "-"
+      )
+      rgl::points3d(
+        thr_plot[, 1], thr_plot[, 2], thr_plot[, 3],
+        col = "red",
+        size = 8
+      )
+    } else {
+      rgl::points3d(
+        thr$x, thr$y, thr$z,
+        col = "red",
+        size = 8
+      )
+    }
   }
 
   Sys.sleep(0.5)
