@@ -16,7 +16,7 @@ safe_require("dplyr")
 safe_require("tibble")
 safe_require("CV3D")
 
-SCRIPT_VERSION <- "0.1.3-selectable-envelope-normals"
+SCRIPT_VERSION <- "0.1.4-precomputed-edge-aware-neighbours"
 SCRIPT_NAME <- "CV3D_R_05A_optics.R"
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
@@ -52,6 +52,12 @@ write_csv_safe <- function(df, path) {
 
 select_existing <- function(df, cols) {
   dplyr::select(df, dplyr::any_of(cols))
+}
+
+parse_neighbour_ids <- function(value) {
+  if (length(value) == 0 || is.na(value) || !nzchar(trimws(as.character(value)))) return(character(0))
+  out <- trimws(strsplit(as.character(value), split = ";", fixed = TRUE)[[1]])
+  out[nzchar(out)]
 }
 
 safe_mean <- function(df, col) {
@@ -111,6 +117,14 @@ main <- function() {
   edge_tol <- as.numeric(task$parameters$edge_tol %||% 0.5)
   if (!is.finite(edge_tol) || edge_tol < 0) edge_tol <- 0.5
 
+  neighbour_file <- NULL
+  if (!is.null(task$input_neighbours_abs) && length(task$input_neighbours_abs) > 0 && !all(is.na(task$input_neighbours_abs))) {
+    neighbour_candidate <- as.character(task$input_neighbours_abs[[1]])
+    if (nzchar(neighbour_candidate) && file.exists(neighbour_candidate)) {
+      neighbour_file <- normalizePath(neighbour_candidate, winslash = "/", mustWork = TRUE)
+    }
+  }
+
   facet_size <- as.numeric(task$parameters$facet_size_estimate %||% 14)
   if (!is.finite(facet_size) || facet_size <= 0) facet_size <- 14
 
@@ -134,7 +148,11 @@ main <- function() {
 
   message("Calculating optical metrics stepwise with CV3D package functions.")
   message("Facet count: ", nrow(facet_df))
-  message("Edge tolerance: ", edge_tol)
+  if (is.null(neighbour_file)) {
+    message("Neighbour source: legacy in-step local tangent-plane calculation; edge tolerance=", edge_tol)
+  } else {
+    message("Neighbour source: precomputed 04B edge-aware neighbour file: ", neighbour_file)
+  }
   message("Cores: ", cores)
   message("Facet-size estimate: ", facet_size)
   message("Sampling lattice: ", lattice)
@@ -144,15 +162,70 @@ main <- function() {
     message("Facet-normal method: regularised facet-centre envelope; factor=", normal_envelope_factor)
   }
 
-  message("Step 05A.1: find_neighbours() using local tangent-plane geometry.")
-  neighbours <- CV3D::find_neighbours(
-    df = facet_df,
-    edge_tol = edge_tol
-  )
+  if (is.null(neighbour_file)) {
+    message("Step 05A.1: legacy fallback find_neighbours() using local tangent-plane geometry.")
+    neighbours <- CV3D::find_neighbours(
+      df = facet_df,
+      edge_tol = edge_tol
+    )
+    neighbour_method <- "local_tangent_plane_legacy_fallback"
+    selected_edge_gap_threshold <- NA_real_
+  } else {
+    message("Step 05A.1: importing precomputed 04B edge-aware neighbours.")
+    neighbour_external <- suppressMessages(readr::read_csv(neighbour_file, show_col_types = FALSE))
+    need_cols(neighbour_external, c("facet_id", "neighbours", "number_of_neighbours"), "04B neighbour table")
+    neighbour_external$facet_id <- as.character(neighbour_external$facet_id)
+    if (anyDuplicated(neighbour_external$facet_id) > 0) stop("04B neighbour table contains duplicate facet_id values.", call. = FALSE)
+    missing_ids <- setdiff(id_map$facet_id, neighbour_external$facet_id)
+    extra_ids <- setdiff(neighbour_external$facet_id, id_map$facet_id)
+    if (length(missing_ids) > 0 || length(extra_ids) > 0) {
+      stop(
+        "04B neighbour table and Step-04 facet-position table contain different facet IDs. ",
+        "Missing in 04B: ", paste(missing_ids, collapse = ", "),
+        "; extra in 04B: ", paste(extra_ids, collapse = ", "),
+        call. = FALSE
+      )
+    }
 
-  if (!"ID" %in% names(neighbours)) stop("find_neighbours() output has no ID column.", call. = FALSE)
+    ext_to_int <- stats::setNames(as.character(id_map$ID), as.character(id_map$facet_id))
+    map_neighbours <- function(value) {
+      ext <- parse_neighbour_ids(value)
+      if (length(ext) == 0) return("")
+      mapped <- unname(ext_to_int[ext])
+      if (any(is.na(mapped))) stop("04B neighbour table contains an unknown neighbour facet ID.", call. = FALSE)
+      paste(mapped, collapse = "; ")
+    }
+    neighbour_external$internal_neighbours <- vapply(neighbour_external$neighbours, map_neighbours, character(1))
+    neighbour_external$ID <- unname(ext_to_int[neighbour_external$facet_id])
+
+    metadata_cols <- c(
+      "ID", "internal_neighbours", "number_of_neighbours", "is_edge_facet",
+      "edge_angular_gap_deg", "edge_gap_threshold_deg", "neighbour_core_spacing_um",
+      "shadow_links_removed", "neighbour_method"
+    )
+    neighbours <- facet_df %>%
+      dplyr::left_join(
+        neighbour_external %>% dplyr::select(dplyr::any_of(metadata_cols)),
+        by = "ID"
+      ) %>%
+      dplyr::mutate(neighbours = .data$internal_neighbours) %>%
+      dplyr::select(-dplyr::any_of("internal_neighbours"))
+
+    neighbour_method <- if ("neighbour_method" %in% names(neighbour_external)) {
+      unique(as.character(neighbour_external$neighbour_method))[1]
+    } else {
+      "edge_aware_mutual6_coregate_angle_shadow"
+    }
+    selected_edge_gap_threshold <- if ("edge_gap_threshold_deg" %in% names(neighbour_external)) {
+      suppressWarnings(as.numeric(neighbour_external$edge_gap_threshold_deg[[1]]))
+    } else {
+      NA_real_
+    }
+  }
+
+  if (!"ID" %in% names(neighbours)) stop("Neighbour data have no ID column.", call. = FALSE)
   if ("number_of_neighbours" %in% names(neighbours) && all(neighbours$number_of_neighbours < 2, na.rm = TRUE)) {
-    stop("All facets have fewer than two neighbours after find_neighbours(); cannot calculate facet normals.", call. = FALSE)
+    stop("All facets have fewer than two neighbours; cannot calculate facet normals.", call. = FALSE)
   }
 
   message("Step 05A.2: calculate_facet_size().")
@@ -239,7 +312,12 @@ main <- function() {
   # Separate outputs, all keyed by the same facet_id exported from Blender.
   facet_sizes <- select_existing(
     optic,
-    c("cv_id", "eye", "facet_id", "internal_ID", "x", "y", "z", "facet_size", "facet_size_smoothed", "number_of_neighbours", "neighbours")
+    c(
+      "cv_id", "eye", "facet_id", "internal_ID", "x", "y", "z",
+      "facet_size", "facet_size_smoothed", "number_of_neighbours", "neighbours",
+      "is_edge_facet", "edge_angular_gap_deg", "edge_gap_threshold_deg",
+      "neighbour_core_spacing_um", "shadow_links_removed", "neighbour_method"
+    )
   )
 
   interfacet_angles <- select_existing(
@@ -277,8 +355,9 @@ main <- function() {
     facet_normal_method = normal_method,
     facet_normal_envelope_factor = if (normal_method == "envelope") normal_envelope_factor else NA_real_,
     facet_normal_post_neighbour_smoothing = normal_method == "original",
-    neighbour_method = "local_tangent_plane",
-    edge_tol = edge_tol,
+    neighbour_method = neighbour_method,
+    edge_gap_threshold_deg = selected_edge_gap_threshold,
+    edge_tol = if (is.null(neighbour_file)) edge_tol else NA_real_,
     cores = cores,
     facet_size_estimate = facet_size,
     spatial_unit = "um",
@@ -297,14 +376,16 @@ main <- function() {
     input_facet_positions = task$input_facet_positions,
     output_optic_parameters = task$output_optic_parameters,
     facet_count = nrow(optic),
-    edge_tol = edge_tol,
+    edge_gap_threshold_deg = selected_edge_gap_threshold,
+    edge_tol = if (is.null(neighbour_file)) edge_tol else NA_real_,
     cores = cores,
     facet_size_estimate = facet_size,
     sampling_lattice = lattice,
     facet_normal_method = normal_method,
     facet_normal_envelope_factor = if (normal_method == "envelope") normal_envelope_factor else NA_real_,
     facet_normal_post_neighbour_smoothing = normal_method == "original",
-    neighbour_method = "local_tangent_plane",
+    neighbour_method = neighbour_method,
+    input_neighbours = if (is.null(neighbour_file)) NULL else task$input_neighbours,
     internal_id_mode = "numeric_internal_ids_blender_facet_id_preserved"
   )))
 }

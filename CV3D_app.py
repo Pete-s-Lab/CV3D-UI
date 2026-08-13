@@ -34,9 +34,10 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.118"
+APP_VERSION = "0.1.119"
 
 CHANGELOG = [
+    "0.1.119: Added dedicated 04B edge-aware neighbour selection with 80-105 degree edge-threshold comparison, stored neighbour output, and 05A consumption of the selected neighbour graph.",
     "0.1.118: Fixed the double-click launcher so pythonw starts CV3D with a normal visible GUI window while helper subprocesses remain console-free.",
     "0.1.117: Suppressed Windows console creation for external helper processes and cached successful CV3D R-package validation for the app session to remove the redundant Rscript check before every R action.",
     "0.1.116: Added a Windows double-click launcher that locates a suitable Python/PySide6 installation and starts CV3D without a console window.",
@@ -124,6 +125,7 @@ BUNDLED_HELPER_SCRIPTS = {
     "r_step03b_script_path": Path("cv3d_helpers/r/CV3D_R_03B_threshold.R"),
     "r_step03b_plot_script_path": Path("cv3d_helpers/r/CV3D_R_03B_plot_threshold.R"),
     "r_step03c_script_path": Path("cv3d_helpers/r/CV3D_R_03C_candidates.R"),
+    "r_step04b_script_path": Path("cv3d_helpers/r/CV3D_R_04B_neighbours.R"),
     "r_step05a_script_path": Path("cv3d_helpers/r/CV3D_R_05A_optics.R"),
     "r_step05b_script_path": Path("cv3d_helpers/r/CV3D_R_05B_align.R"),
     "r_step05c_script_path": Path("cv3d_helpers/r/CV3D_R_05C_projection.R"),
@@ -184,6 +186,7 @@ STEP_ORDER = [
     "03b_local_height_thresholding",
     "03c_facet_candidate_condensation",
     "04_blender_facet_check_landmarking",
+    "04b_neighbour_selection",
     "05a_optical_metrics",
     "05b_global_coordinate_rotation",
     "05c_corneal_projections",
@@ -192,28 +195,31 @@ STEP_ORDER = [
 DOWNSTREAM = {
     "02_blender_cornea_extraction": [
         "03a_local_height_calculation", "03b_local_height_thresholding",
-        "03c_facet_candidate_condensation", "04_blender_facet_check_landmarking",
+        "03c_facet_candidate_condensation", "04_blender_facet_check_landmarking", "04b_neighbour_selection",
         "05a_optical_metrics", "05b_global_coordinate_rotation",
         "05c_corneal_projections"
     ],
     "03a_local_height_calculation": [
         "03a2_local_height_normalization", "03b_local_height_thresholding", "03c_facet_candidate_condensation",
-        "04_blender_facet_check_landmarking", "05a_optical_metrics",
+        "04_blender_facet_check_landmarking", "04b_neighbour_selection", "05a_optical_metrics",
         "05b_global_coordinate_rotation", "05c_corneal_projections"
     ],
     "03a2_local_height_normalization": ["03a_local_height_calculation"],
     "03b_local_height_thresholding": [
-        "03c_facet_candidate_condensation", "04_blender_facet_check_landmarking",
+        "03c_facet_candidate_condensation", "04_blender_facet_check_landmarking", "04b_neighbour_selection",
         "05a_optical_metrics", "05b_global_coordinate_rotation",
         "05c_corneal_projections"
     ],
     "03c_facet_candidate_condensation": [
-        "04_blender_facet_check_landmarking", "05a_optical_metrics",
+        "04_blender_facet_check_landmarking", "04b_neighbour_selection", "05a_optical_metrics",
         "05b_global_coordinate_rotation", "05c_corneal_projections"
     ],
     "04_blender_facet_check_landmarking": [
-        "05a_optical_metrics", "05b_global_coordinate_rotation",
+        "04b_neighbour_selection", "05a_optical_metrics", "05b_global_coordinate_rotation",
         "05c_corneal_projections"
+    ],
+    "04b_neighbour_selection": [
+        "05a_optical_metrics", "05b_global_coordinate_rotation", "05c_corneal_projections"
     ],
     "05a_optical_metrics": [],
     "05b_global_coordinate_rotation": ["05c_corneal_projections"],
@@ -230,7 +236,8 @@ REQUIRED_INPUT_STEPS = {
     "03b_local_height_thresholding": ["03a_local_height_calculation"],
     "03c_facet_candidate_condensation": ["03b_local_height_thresholding"],
     "04_blender_facet_check_landmarking": ["03c_facet_candidate_condensation"],
-    "05a_optical_metrics": ["04_blender_facet_check_landmarking"],
+    "04b_neighbour_selection": ["04_blender_facet_check_landmarking"],
+    "05a_optical_metrics": ["04b_neighbour_selection"],
     "05b_global_coordinate_rotation": ["05a_optical_metrics"],
     "05c_corneal_projections": ["05a_optical_metrics", "05b_global_coordinate_rotation"],
 }
@@ -244,6 +251,7 @@ STEP_LABELS = {
     "03b_local_height_thresholding": "03B Local-height thresholding",
     "03c_facet_candidate_condensation": "03C Facet candidate condensation",
     "04_blender_facet_check_landmarking": "04 Facet position checking",
+    "04b_neighbour_selection": "04B Neighbour selection",
     "05_blender_head_landmarking": "05 Head landmarking",
     "05a_optical_metrics": "05A Optical metrics",
     "05b_global_coordinate_rotation": "05B Global coordinate rotation",
@@ -510,6 +518,7 @@ def load_app_settings() -> Dict[str, Any]:
         settings.setdefault("r_step03b_script_path", "")
         settings.setdefault("r_step03b_plot_script_path", "")
         settings.setdefault("r_step03c_script_path", "")
+        settings.setdefault("r_step04b_script_path", "")
         settings.setdefault("r_step05a_script_path", "")
         settings.setdefault("r_step05b_script_path", "")
         settings.setdefault("r_step05c_script_path", "")
@@ -543,6 +552,7 @@ def load_app_settings() -> Dict[str, Any]:
         "r_step03b_script_path": "",
         "r_step03b_plot_script_path": "",
         "r_step03c_script_path": "",
+        "r_step04b_script_path": "",
         "r_step05a_script_path": "",
         "r_step05b_script_path": "",
         "r_step05c_script_path": "",
@@ -772,6 +782,15 @@ def eye_file_map(cv_id: str, eye: str) -> Dict[str, str]:
         "facet_positions_file": eye_rel_path(eye, f"04_{cv_id}_{eye}_facet_positions.csv"),
         "facet_positions_plot_file": eye_inspection_rel_path(eye, f"04_{cv_id}_{eye}_facet_positions_on_local_height.png"),
         "facet_check_blend_file": eye_rel_path(eye, f"02_{cv_id}_{eye}_cornea.blend"),
+
+        "r_step04b_preview_task_file": eye_json_rel_path(eye, f"04B_{cv_id}_{eye}_preview_R_task.json"),
+        "r_step04b_preview_status_file": eye_json_rel_path(eye, f"04B_{cv_id}_{eye}_preview_R_status.json"),
+        "r_step04b_task_file": eye_json_rel_path(eye, f"04B_{cv_id}_{eye}_R_task.json"),
+        "r_step04b_status_file": eye_json_rel_path(eye, f"04B_{cv_id}_{eye}_R_status.json"),
+        "edge_gap_table_file": eye_rel_path(eye, f"04B_{cv_id}_{eye}_edge_angular_gaps.csv"),
+        "neighbours_file": eye_rel_path(eye, f"04B_{cv_id}_{eye}_neighbours.csv"),
+        "shadow_removed_links_file": eye_rel_path(eye, f"04B_{cv_id}_{eye}_angle_shadow_removed_links.csv"),
+        "edge_threshold_comparison_plot_file": eye_inspection_rel_path(eye, f"04B_{cv_id}_{eye}_edge_detection_threshold_comparison.png"),
 
         "r_step05a_task_file": eye_json_rel_path(eye, f"05A_{cv_id}_{eye}_R_task.json"),
         "r_step05a_status_file": eye_json_rel_path(eye, f"05A_{cv_id}_{eye}_R_status.json"),
@@ -2184,6 +2203,7 @@ class CV3DMainWindow(QMainWindow):
                 ("03b_local_height_thresholding", "Threshold local heights", self.launch_r_03b_local_height_thresholding),
                 ("03c_facet_candidate_condensation", "Condense facet candidates", self.launch_r_03c_facet_candidate_condensation),
                 ("04_blender_facet_check_landmarking", "Check facet positions", self.launch_blender_facet_position_checking),
+                ("04b_neighbour_selection", "Find neighbours", self.launch_r_04b_neighbours),
             ]
             for step, text, func in button_specs:
                 label = QLabel(f"{STEP_LABELS[step]}: ○ not started")
@@ -2297,8 +2317,9 @@ class CV3DMainWindow(QMainWindow):
         layout.addWidget(self.r_analysis_summary)
 
         note = QLabel(
-            "Run downstream R analyses after checked facet positions are available. "
-            "05A is eye-specific and does not require head landmarks. 05B and 05C are also eye-specific; 05B uses the specimen-level landmarks for global alignment."
+            "Run 04B Neighbour selection on the Workflow page after checked facet positions are available. "
+            "05A then uses the stored neighbour graph and is eye-specific; it does not require head landmarks. "
+            "05B and 05C are also eye-specific; 05B uses the specimen-level landmarks for global alignment."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -2657,6 +2678,15 @@ class CV3DMainWindow(QMainWindow):
         browse_r_step03c.clicked.connect(self.browse_r_step03c_script)
         r_step03c_row.addWidget(browse_r_step03c)
         form.addRow("CV3D R Step 03C candidate condensation runner", r_step03c_row)
+
+        self.r_step04b_script_edit = QLineEdit()
+        self.r_step04b_script_edit.setText(self.settings.get("r_step04b_script_path", ""))
+        r_step04b_row = QHBoxLayout()
+        r_step04b_row.addWidget(self.r_step04b_script_edit, 1)
+        browse_r_step04b = QPushButton("Browse")
+        browse_r_step04b.clicked.connect(self.browse_r_step04b_script)
+        r_step04b_row.addWidget(browse_r_step04b)
+        form.addRow("CV3D R Step 04B neighbour runner", r_step04b_row)
 
         self.r_step05a_script_edit = QLineEdit()
         self.r_step05a_script_edit.setText(self.settings.get("r_step05a_script_path", ""))
@@ -3307,7 +3337,7 @@ class CV3DMainWindow(QMainWindow):
 
         cv_id = self.config["dataset_identity"]["cv_id"]
         self.r_analysis_summary.setText(
-            f"{cv_id} R analysis — downstream analysis after checked facet positions and head landmarks."
+            f"{cv_id} R analysis — optical analysis after 04B neighbour selection."
         )
 
         analysis_steps = [
@@ -3577,6 +3607,7 @@ class CV3DMainWindow(QMainWindow):
             f"R 03B runner set: {bool(self.settings.get('r_step03b_script_path'))} | "
             f"R 03B plot runner set: {bool(self.settings.get('r_step03b_plot_script_path'))} | "
             f"R 03C runner set: {bool(self.settings.get('r_step03c_script_path'))} | "
+            f"R 04B runner set: {bool(self.settings.get('r_step04b_script_path'))} | "
             f"R 05A runner set: {bool(self.settings.get('r_step05a_script_path'))} | "
             f"R 05B runner set: {bool(self.settings.get('r_step05b_script_path'))} | "
             f"R 05C runner set: {bool(self.settings.get('r_step05c_script_path'))} | "
@@ -3613,6 +3644,8 @@ class CV3DMainWindow(QMainWindow):
             self.r_step03b_plot_script_edit.setText(self.settings.get("r_step03b_plot_script_path", ""))
         if hasattr(self, "r_step03c_script_edit"):
             self.r_step03c_script_edit.setText(self.settings.get("r_step03c_script_path", ""))
+        if hasattr(self, "r_step04b_script_edit"):
+            self.r_step04b_script_edit.setText(self.settings.get("r_step04b_script_path", ""))
         if hasattr(self, "r_step05a_script_edit"):
             self.r_step05a_script_edit.setText(self.settings.get("r_step05a_script_path", ""))
         if hasattr(self, "r_step05b_script_edit"):
@@ -4390,6 +4423,8 @@ class CV3DMainWindow(QMainWindow):
             self.settings["r_step03b_plot_script_path"] = self.r_step03b_plot_script_edit.text().strip()
         if hasattr(self, "r_step03c_script_edit"):
             self.settings["r_step03c_script_path"] = self.r_step03c_script_edit.text().strip()
+        if hasattr(self, "r_step04b_script_edit"):
+            self.settings["r_step04b_script_path"] = self.r_step04b_script_edit.text().strip()
         if hasattr(self, "r_step05a_script_edit"):
             self.settings["r_step05a_script_path"] = self.r_step05a_script_edit.text().strip()
         if hasattr(self, "r_step05b_script_edit"):
@@ -6112,6 +6147,9 @@ class CV3DMainWindow(QMainWindow):
             "04_blender_facet_check_landmarking": [
                 "facet_positions_file",
             ],
+            "04b_neighbour_selection": [
+                "neighbours_file",
+            ],
             "05a_optical_metrics": [
                 "optic_parameters_file",
                 "facet_normals_file",
@@ -6179,7 +6217,7 @@ class CV3DMainWindow(QMainWindow):
                 if current_state in {"complete", "complete_with_warning", "needs_rerun", "running"}:
                     continue
 
-                if is_mirrored and step in {"04_blender_facet_check_landmarking", "05a_optical_metrics", "05b_global_coordinate_rotation", "05c_corneal_projections"}:
+                if is_mirrored and step in {"04_blender_facet_check_landmarking", "04b_neighbour_selection", "05a_optical_metrics", "05b_global_coordinate_rotation", "05c_corneal_projections"}:
                     step_state.update({
                         "state": "complete_with_warning",
                         "symbol": "⇄",
@@ -6434,6 +6472,7 @@ class CV3DMainWindow(QMainWindow):
             "r_step03b_script_edit": "r_step03b_script_path",
             "r_step03b_plot_script_edit": "r_step03b_plot_script_path",
             "r_step03c_script_edit": "r_step03c_script_path",
+            "r_step04b_script_edit": "r_step04b_script_path",
             "r_step05a_script_edit": "r_step05a_script_path",
             "r_step05b_script_edit": "r_step05b_script_path",
             "r_step05c_script_edit": "r_step05c_script_path",
@@ -6481,7 +6520,7 @@ class CV3DMainWindow(QMainWindow):
                 self.status["workflow_steps"][downstream][eye]["messages"] = [f"Upstream step {step} changed."]
         # Mirroring is a derived output and needs rerun if a source eye changes from step 04 onward.
         mirror = self.status["workflow_steps"].setdefault("05d_mirror_missing_eye", {"label": STEP_LABELS["05d_mirror_missing_eye"], "state": "not_created", "symbol": "○", "messages": []})
-        if step in ["04_blender_facet_check_landmarking", "05a_optical_metrics", "05b_global_coordinate_rotation", "05c_corneal_projections"]:
+        if step in ["04_blender_facet_check_landmarking", "04b_neighbour_selection", "05a_optical_metrics", "05b_global_coordinate_rotation", "05c_corneal_projections"]:
             affected = [
                 eye_id for eye_id in EYES
                 if self.config and self.config.get("eyes", {}).get(eye_id, {}).get("mirrored_from_eye") == eye
@@ -7781,6 +7820,9 @@ class CV3DMainWindow(QMainWindow):
                 details.append(status_message)
             QMessageBox.warning(self, f"{label} failed", f"The {label} were not created successfully.\n\n" + "\n".join(details))
 
+    def browse_r_step04b_script(self) -> None:
+        self.browse_helper_script_setting("r_step04b_script_path", "r_step04b_script_edit", "Select CV3D R Step 04B neighbour runner", "R scripts (*.R *.r);;All files (*)")
+
     def browse_r_step05a_script(self) -> None:
         self.browse_helper_script_setting("r_step05a_script_path", "r_step05a_script_edit", "Select CV3D R Step 05A optic metrics runner", "R scripts (*.R *.r);;All files (*)")
 
@@ -8617,7 +8659,209 @@ class CV3DMainWindow(QMainWindow):
             write_csv(path, fieldnames, rows)
         return changed
 
-    def create_r_step05a_task(self, eye: str, edge_tol: float, cores: int, lattice: str, normal_method: str, normal_envelope_factor: Optional[float]) -> Path:
+    def create_r_step04b_task(self, eye: str, mode: str, edge_gap_threshold_deg: Optional[float] = None) -> Path:
+        cv_id = self.config["dataset_identity"]["cv_id"]
+        files = self.config["eyes"][eye]["files"]
+        self.make_blender_facet_names_authoritative(eye)
+        mode = str(mode).strip().lower()
+        if mode not in {"preview", "final"}:
+            raise ValueError("04B mode must be 'preview' or 'final'.")
+
+        if mode == "preview":
+            task_rel = files["r_step04b_preview_task_file"]
+            status_rel = files["r_step04b_preview_status_file"]
+            stdout_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_preview_R_stdout.log")
+            stderr_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_preview_R_stderr.log")
+        else:
+            task_rel = files["r_step04b_task_file"]
+            status_rel = files["r_step04b_status_file"]
+            stdout_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_R_stdout.log")
+            stderr_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_R_stderr.log")
+
+        task = {
+            "task_type": "04B_edge_aware_neighbours",
+            "task_prefix": "04B",
+            "mode": mode,
+            "cv_id": cv_id,
+            "eye": eye,
+            "analysis_folder": str(self.analysis_folder),
+            "input_facet_positions": files["facet_positions_file"],
+            "input_facet_positions_abs": str(self.analysis_folder / files["facet_positions_file"]),
+            "status_file": status_rel,
+            "status_file_abs": str(self.analysis_folder / status_rel),
+            "stdout_file": stdout_rel,
+            "stdout_file_abs": str(self.analysis_folder / stdout_rel),
+            "stderr_file": stderr_rel,
+            "stderr_file_abs": str(self.analysis_folder / stderr_rel),
+        }
+        if mode == "preview":
+            task.update({
+                "thresholds_deg": [80, 85, 90, 95, 100, 105],
+                "output_edge_gap_table": files["edge_gap_table_file"],
+                "output_edge_gap_table_abs": str(self.analysis_folder / files["edge_gap_table_file"]),
+                "output_comparison_png": files["edge_threshold_comparison_plot_file"],
+                "output_comparison_png_abs": str(self.analysis_folder / files["edge_threshold_comparison_plot_file"]),
+            })
+        else:
+            if edge_gap_threshold_deg is None:
+                raise ValueError("A selected edge-gap threshold is required for the final 04B run.")
+            task.update({
+                "edge_gap_threshold_deg": float(edge_gap_threshold_deg),
+                "output_neighbours": files["neighbours_file"],
+                "output_neighbours_abs": str(self.analysis_folder / files["neighbours_file"]),
+                "output_shadow_removed_links": files["shadow_removed_links_file"],
+                "output_shadow_removed_links_abs": str(self.analysis_folder / files["shadow_removed_links_file"]),
+            })
+
+        task_path = self.analysis_folder / task_rel
+        write_json(task_path, task)
+        return task_path
+
+    def run_r_step04b_task(self, task_path: Path) -> tuple[bool, str]:
+        self.r_setup_values_from_ui()
+        rscript = configured_file_path(self.settings.get("rscript_executable", ""))
+        runner = self.resolve_r_analysis_runner("r_step04b_script_path")
+        if rscript is None:
+            QMessageBox.warning(self, "Rscript executable missing", "Set a valid Rscript executable in Settings first.")
+            return False, "Rscript executable missing."
+        if runner is None:
+            QMessageBox.warning(self, "04B R runner missing", "Could not find the bundled or configured 04B neighbour runner.")
+            return False, "04B R runner missing."
+        if not self.ensure_r_package_installed():
+            return False, "CV3D R package check failed."
+
+        task = read_json(task_path)
+        stdout_path = resolve_task_path(task, "stdout_file_abs", self.analysis_folder)
+        stderr_path = resolve_task_path(task, "stderr_file_abs", self.analysis_folder)
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        launch_path = self.analysis_folder / eye_log_rel_path(
+            task["eye"],
+            f"04B_{task['cv_id']}_{task['eye']}_{task.get('mode', 'run')}_R_launch_command.txt"
+        )
+        launch_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
+        write_text(
+            launch_path,
+            "Command:\n" + " ".join(chr(34) + str(part) + chr(34) for part in cmd) +
+            "\n\nWorking directory:\n" + str(self.analysis_folder) + "\n"
+        )
+        try:
+            with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
+                result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+            exit_code = result.returncode
+            with launch_path.open("a", encoding="utf-8") as f:
+                f.write(f"\nExit code:\n{exit_code}\n")
+        except Exception as e:
+            QMessageBox.critical(self, "04B Rscript launch failed", str(e))
+            return False, str(e)
+
+        status_path = resolve_task_path(task, "status_file_abs", self.analysis_folder)
+        runner_status = "unknown"
+        status_message = ""
+        if status_path.exists():
+            try:
+                payload = read_json(status_path)
+                runner_status = str(payload.get("status", "unknown"))
+                status_message = str(payload.get("message", ""))
+            except Exception as e:
+                runner_status = "unreadable_status_json"
+                status_message = str(e)
+
+        ok = exit_code == 0 and runner_status == "success"
+        if not ok:
+            QMessageBox.critical(
+                self,
+                "04B neighbour step failed",
+                f"Rscript exit code: {exit_code}\nRunner status: {runner_status}\n\n"
+                f"{status_message}\n\nstdout: {task.get('stdout_file', '')}\nstderr: {task.get('stderr_file', '')}"
+            )
+        return ok, status_message
+
+    def launch_r_04b_neighbours(self, eye: str) -> None:
+        if not self.ensure_step_ready("04b_neighbour_selection", eye):
+            return
+
+        try:
+            preview_task = self.create_r_step04b_task(eye, "preview")
+        except Exception as e:
+            QMessageBox.warning(self, "Cannot create 04B preview task", str(e))
+            return
+
+        ok, _ = self.run_r_step04b_task(preview_task)
+        if not ok:
+            return
+
+        files = self.config["eyes"][eye]["files"]
+        comparison_path = self.analysis_folder / files["edge_threshold_comparison_plot_file"]
+        if not comparison_path.exists():
+            QMessageBox.warning(self, "04B comparison missing", f"Expected comparison PNG was not created:\n\n{comparison_path}")
+            return
+
+        self.open_local_path(comparison_path, "04B edge-threshold comparison plot")
+        QApplication.processEvents()
+
+        thresholds = [80, 85, 90, 95, 100, 105]
+        previous = self.config.get("eyes", {}).get(eye, {}).get("edge_gap_threshold_deg", 90)
+        try:
+            previous = float(previous)
+        except Exception:
+            previous = 90.0
+        default_index = min(range(len(thresholds)), key=lambda i: abs(thresholds[i] - previous))
+        labels = [f"{v} degrees" for v in thresholds]
+        choice, accepted = QInputDialog.getItem(
+            self,
+            "04B edge-facet threshold",
+            "Compare the opened PNG, then choose the angular-gap threshold used to identify edge facets:",
+            labels,
+            default_index,
+            False,
+        )
+        if not accepted:
+            return
+        selected = thresholds[labels.index(choice)]
+
+        try:
+            final_task = self.create_r_step04b_task(eye, "final", float(selected))
+        except Exception as e:
+            QMessageBox.warning(self, "Cannot create 04B neighbour task", str(e))
+            return
+
+        before = self.status["workflow_steps"]["04b_neighbour_selection"][eye].get("state", "not_started")
+        state_ref = self.status["workflow_steps"]["04b_neighbour_selection"][eye]
+        state_ref.update({
+            "state": "running",
+            "symbol": STATE_SYMBOL["running"],
+            "last_run": now(),
+            "needs_rerun": False,
+            "messages": [f"Calculating edge-aware neighbours with edge angular-gap threshold {selected} degrees."],
+        })
+        self.save_current_files()
+        self.refresh_all()
+
+        ok, status_message = self.run_r_step04b_task(final_task)
+        if not ok:
+            self.set_eye_step_state("04b_neighbour_selection", eye, "failed", [status_message or "04B neighbour calculation failed."])
+            self.save_current_files()
+            self.refresh_all()
+            return
+
+        self.config.setdefault("eyes", {}).setdefault(eye, {})["edge_gap_threshold_deg"] = float(selected)
+        messages = [f"04B neighbours completed with edge angular-gap threshold {selected} degrees."]
+        if status_message:
+            messages.append(status_message)
+        self.set_eye_step_state("04b_neighbour_selection", eye, "complete", messages)
+        self.mark_downstream_needs_rerun("04b_neighbour_selection", eye)
+        append_log(
+            self.analysis_folder, self.config["dataset_identity"]["cv_id"], eye,
+            "04b_neighbour_selection", "launch_rscript", before, "complete", "success", "; ".join(messages)
+        )
+        self.save_current_files()
+        self.validate_current_workflow_outputs(save_changes=True)
+        self.refresh_all()
+
+    def create_r_step05a_task(self, eye: str, cores: int, lattice: str, normal_method: str, normal_envelope_factor: Optional[float]) -> Path:
         cv_id = self.config["dataset_identity"]["cv_id"]
         files = self.config["eyes"][eye]["files"]
         self.make_blender_facet_names_authoritative(eye)
@@ -8630,6 +8874,8 @@ class CV3DMainWindow(QMainWindow):
             "analysis_folder": str(self.analysis_folder),
             "input_facet_positions": files["facet_positions_file"],
             "input_facet_positions_abs": str(self.analysis_folder / files["facet_positions_file"]),
+            "input_neighbours": files["neighbours_file"],
+            "input_neighbours_abs": str(self.analysis_folder / files["neighbours_file"]),
             "output_optic_parameters": files["optic_parameters_file"],
             "output_optic_parameters_abs": str(self.analysis_folder / files["optic_parameters_file"]),
             "output_facet_normals": files["facet_normals_file"],
@@ -8651,7 +8897,6 @@ class CV3DMainWindow(QMainWindow):
             "stderr_file": eye_log_rel_path(eye, f"05A_{cv_id}_{eye}_R_stderr.log"),
             "stderr_file_abs": str(self.analysis_folder / eye_log_rel_path(eye, f"05A_{cv_id}_{eye}_R_stderr.log")),
             "parameters": {
-                "edge_tol": float(edge_tol),
                 "cores": int(cores),
                 "facet_size_estimate": float(facet_size),
                 "lattice": str(lattice),
@@ -8676,18 +8921,13 @@ class CV3DMainWindow(QMainWindow):
             normal_envelope_factor_default = 1.25
         dlg = RuntimeParamDialog(
             "05A Optical metrics",
-            {"edge_tol": 0.5, "cores": max_cores},
+            {"cores": max_cores},
             self,
             show_lattice=True,
             lattice_default=lattice_default,
             show_normal_method=True,
             normal_method_default=normal_method_default,
             normal_envelope_factor_default=normal_envelope_factor_default,
-            info_text=(
-                "Neighbour-link tolerance is the relative allowance used when deciding whether a candidate link is a true facet-neighbour link. "
-                "At 0.5, links up to 1.5× the larger local facet-spacing estimate of the two facets are retained. "
-                "Lower values are stricter; higher values retain more links."
-            ),
         )
         if dlg.exec() != QDialog.Accepted:
             return
@@ -8703,7 +8943,6 @@ class CV3DMainWindow(QMainWindow):
             normal_envelope_factor = None
         task_path = self.create_r_step05a_task(
             eye,
-            dlg.values["edge_tol"],
             int(dlg.values["cores"]),
             lattice,
             normal_method,
@@ -9008,7 +9247,7 @@ class CV3DMainWindow(QMainWindow):
         derived_files.update({"source_mirrored_from_eye": source, "target_anatomical_eye": target, "mirror_plane": mirror_plane.upper()})
 
         csv_or_json_keys = [
-            "facet_positions_file", "optic_parameters_file", "facet_normals_file", "facet_sizes_file",
+            "facet_positions_file", "neighbours_file", "optic_parameters_file", "facet_normals_file", "facet_sizes_file",
             "interfacet_angles_file", "sampling_acuity_file", "optical_summary_file",
             "landmark_referenced_coordinates_file", "global_aligned_pointcloud_file", "global_coordinates_file",
             "global_rotation_matrix_file", "global_coordinate_metadata_file", "corneal_projections_file"
@@ -9019,11 +9258,11 @@ class CV3DMainWindow(QMainWindow):
         ]
 
         # Overwrite means: remove old target 04/05 outputs and old target QC PNGs/PDFs first.
-        for key in csv_or_json_keys + ["blender_step04_status_file", "r_step05a_status_file", "r_step05b_status_file", "r_step05c_status_file"]:
+        for key in csv_or_json_keys + ["blender_step04_status_file", "r_step04b_status_file", "r_step05a_status_file", "r_step05b_status_file", "r_step05c_status_file"]:
             remove_path_if_exists(derived_files.get(key))
         target_inspection = self.analysis_folder / eye_folder_name(target) / "inspection"
         if target_inspection.exists():
-            for pattern in ["04_*", "05A_*", "05B_*", "05C_*"]:
+            for pattern in ["04_*", "04B_*", "05A_*", "05B_*", "05C_*"]:
                 for p in target_inspection.glob(pattern):
                     if p.is_file():
                         try:
@@ -9071,6 +9310,7 @@ class CV3DMainWindow(QMainWindow):
 
         for key, msg in [
             ("blender_step04_status_file", "04 facet positions mirrored from source eye; step was not rerun."),
+            ("r_step04b_status_file", "04B neighbour graph mirrored from source eye; no recalculation."),
             ("r_step05a_status_file", "05A optical outputs mirrored from source eye; no recalculation."),
             ("r_step05b_status_file", "05B global-coordinate outputs mirrored from source eye; no recalculation."),
             ("r_step05c_status_file", "05C corneal-projection outputs mirrored from source eye; no recalculation.")
@@ -9104,7 +9344,7 @@ class CV3DMainWindow(QMainWindow):
             "tag": "mirrored",
             "created_files": created,
             "missing_source_files": missing,
-            "notes": f"Mirrored outputs derived from {source} and written into the actual {target} eye folder. Facet positions, 05A optical outputs, 05B global facet outputs, and 05C corneal projections are mirrored from existing files; specimen-level head landmark rows are copied unchanged and are not mirrored."
+            "notes": f"Mirrored outputs derived from {source} and written into the actual {target} eye folder. Facet positions, 04B neighbour outputs, 05A optical outputs, 05B global facet outputs, and 05C corneal projections are mirrored from existing files; specimen-level head landmark rows are copied unchanged and are not mirrored."
         }
         write_json(self.analysis_folder / meta_file, meta)
         created.append(meta_file)
@@ -9133,7 +9373,7 @@ class CV3DMainWindow(QMainWindow):
         workflow = self.status.setdefault("workflow_steps", {})
         for step in STEP_ORDER:
             workflow.setdefault(step, {"label": STEP_LABELS.get(step, step)})
-            if step in {"04_blender_facet_check_landmarking", "05a_optical_metrics", "05b_global_coordinate_rotation", "05c_corneal_projections"}:
+            if step in {"04_blender_facet_check_landmarking", "04b_neighbour_selection", "05a_optical_metrics", "05b_global_coordinate_rotation", "05c_corneal_projections"}:
                 state = "complete_with_warning" if missing else "complete"
                 message = f"Values mirrored from {source} using {mirror_plane.upper()} plane; this step was not rerun."
                 symbol = "⇄"
@@ -9550,7 +9790,7 @@ class CV3DMainWindow(QMainWindow):
         write_json(self.analysis_folder / out["metadata_json"]["file"], metadata)
         created.append(out["metadata_json"]["file"])
         manifest_rows = [
-            {"file": out["analysis_ready_table"]["file"], "file_type": "csv", "step": "06_analysis_ready_export", "eye": "all", "description": "Facet-level analysis-ready table; one row per facet.", "created_by": APP_VERSION, "source_files": "05A/05B/05C per-eye outputs"},
+            {"file": out["analysis_ready_table"]["file"], "file_type": "csv", "step": "06_analysis_ready_export", "eye": "all", "description": "Facet-level analysis-ready table; one row per facet.", "created_by": APP_VERSION, "source_files": "04B/05A/05B/05C per-eye outputs"},
             {"file": out["eye_summary"]["file"], "file_type": "csv", "step": "06_analysis_ready_export", "eye": "all", "description": "Eye-wise and combined specimen summary table.", "created_by": APP_VERSION, "source_files": out["analysis_ready_table"]["file"]},
             {"file": out["specimen_summary"]["file"], "file_type": "csv", "step": "06_analysis_ready_export", "eye": "both_eyes", "description": "Specimen-level combined summary row.", "created_by": APP_VERSION, "source_files": out["analysis_ready_table"]["file"]},
             {"file": out["metadata_json"]["file"], "file_type": "json", "step": "06_analysis_ready_export", "eye": "all", "description": "Export metadata and provenance.", "created_by": APP_VERSION, "source_files": "project config/status"},
