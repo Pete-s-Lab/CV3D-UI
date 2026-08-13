@@ -34,9 +34,10 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.114"
+APP_VERSION = "0.1.115"
 
 CHANGELOG = [
+    "0.1.115: Removed raw facet-size plotting, added optional facet-ID labels to Choose facet value plots, and corrected 05C PDF snapshot sphere scaling/aspect-preserving placement.",
     "0.1.114: Renamed 05A plot actions, moved normals into Choose facet value, defaulted optional rgl views to on, and added a normal-vector visibility toggle with a dedicated normals-options dialog.",
     "0.1.113: Defaulted facet-sphere diameter scaling to 2x and consolidated plot inputs into one options dialog per plot action; dataset creation source inputs are also collected in one dialog.",
     "0.1.112: Shortened R Analysis action labels and added user-scalable facet-sphere diameters for 05A/05B/05C rgl QC plots (1x = facet size, 0 = legacy plot size, dataset estimate used as fallback).",
@@ -1436,6 +1437,8 @@ class PlotOptionsDialog(QDialog):
         normal_length_default: float = 5.0,
         open_rgl_default: bool = True,
         facet_sphere_scale_default: float = 2.0,
+        show_facet_labels_option: bool = False,
+        show_facet_labels_default: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -1451,6 +1454,13 @@ class PlotOptionsDialog(QDialog):
             for col, label in self.metric_choices:
                 self.metric_combo.addItem(label, col)
             form.addRow("Value", self.metric_combo)
+
+        self.show_facet_labels = None
+        if show_facet_labels_option:
+            self.show_facet_labels = QCheckBox("Show facet labels")
+            self.show_facet_labels.setChecked(bool(show_facet_labels_default))
+            self.show_facet_labels.setToolTip("Show facet IDs next to the facet markers/spheres.")
+            form.addRow(self.show_facet_labels)
 
         self.normal_length_spin = None
         if show_normal_length:
@@ -1503,6 +1513,8 @@ class PlotOptionsDialog(QDialog):
             idx = self.metric_combo.currentIndex()
             self.values["selected_metric_col"] = str(self.metric_combo.currentData() or "")
             self.values["selected_metric_label"] = str(self.metric_combo.currentText() or "")
+        if self.show_facet_labels is not None:
+            self.values["show_facet_labels"] = bool(self.show_facet_labels.isChecked())
         if self.normal_length_spin is not None:
             self.values["normal_length_facet_size_factor"] = float(self.normal_length_spin.value())
         super().accept()
@@ -7079,8 +7091,7 @@ class CV3DMainWindow(QMainWindow):
 
     def get_05a_metric_plot_choices(self, optic_path: Path) -> List[tuple[str, str]]:
         preferred_labels = {
-            "facet_size_smoothed": "Facet size (smoothed)",
-            "facet_size": "Facet size (raw)",
+            "facet_size_smoothed": "Facet size",
             "interfacet_angle_deg": "IF angle (deg)",
             "interfacet_angle_rad": "IF angle (rad)",
             "eye_parameter": "Eye parameter",
@@ -7094,7 +7105,8 @@ class CV3DMainWindow(QMainWindow):
             # Normal-estimator provenance/QC fields are retained in the CSV/export,
             # but are not useful as generic per-facet biological metric plots.
             "normal_envelope_factor", "normal_support_scale_um",
-            "normal_weight_cutoff_um", "normal_support_face_count", "n_neighbors_used", "n_neighbours_used"
+            "normal_weight_cutoff_um", "normal_support_face_count", "n_neighbors_used", "n_neighbours_used",
+            "facet_size"
         }
         rows: List[Dict[str, str]] = []
         fieldnames: List[str] = []
@@ -7126,7 +7138,7 @@ class CV3DMainWindow(QMainWindow):
             return False
 
         preferred_order = [
-            "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd", "sampling_frequency_rad", "interfacet_angle_rad", "number_of_neighbours", "facet_size"
+            "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd", "sampling_frequency_rad", "interfacet_angle_rad", "number_of_neighbours"
         ]
         ordered: List[str] = []
         for col in preferred_order:
@@ -7224,6 +7236,8 @@ class CV3DMainWindow(QMainWindow):
             metric_choices=metric_choices,
             open_rgl_default=True,
             facet_sphere_scale_default=self.default_facet_sphere_scale(),
+            show_facet_labels_option=(plot_kind == "labelled_metric"),
+            show_facet_labels_default=False,
         )
         if options.exec() != QDialog.Accepted:
             return
@@ -7234,6 +7248,7 @@ class CV3DMainWindow(QMainWindow):
         open_rgl_window = bool(options.values.get("open_rgl_window", False))
         facet_sphere_scale = float(options.values.get("facet_sphere_scale", 0.0))
         facet_size_estimate = self.facet_size_estimate_for_plot()
+        show_facet_labels = bool(options.values.get("show_facet_labels", False))
         normal_length_facet_size_factor = None
         show_normals = True
 
@@ -7273,7 +7288,8 @@ class CV3DMainWindow(QMainWindow):
             task_prefix = "05AL"
             label = f"05A labelled metric plot ({selected_metric_label})"
             metric_token = safe_filename_token(selected_metric_col)
-            output_png_rel = eye_inspection_rel_path(eye, f"05A_{cv_id}_{eye}_metric_{metric_token}_facet_labels.png")
+            label_suffix = "_facet_labels" if show_facet_labels else ""
+            output_png_rel = eye_inspection_rel_path(eye, f"05A_{cv_id}_{eye}_metric_{metric_token}{label_suffix}.png")
         else:
             QMessageBox.warning(self, "Unknown plot type", f"Unknown 05A plot kind: {plot_kind}")
             return
@@ -7304,6 +7320,7 @@ class CV3DMainWindow(QMainWindow):
             "selected_metric_label": selected_metric_label,
             "normal_length_facet_size_factor": normal_length_facet_size_factor,
             "show_normals": show_normals,
+            "show_facet_labels": show_facet_labels,
             "parameters": {"normal_length_facet_size_factor": normal_length_facet_size_factor} if normal_length_facet_size_factor is not None else {},
             "status_file": status_rel,
             "status_file_abs": str(self.analysis_folder / status_rel),
@@ -9529,6 +9546,8 @@ class CV3DMainWindow(QMainWindow):
             return messages
 
         cv_id = self.config["dataset_identity"]["cv_id"]
+        report_facet_sphere_scale = self.default_facet_sphere_scale()
+        report_facet_size_estimate = self.facet_size_estimate_for_plot()
         scopes = []
         active = [e for e in self.active_export_eyes() if self.config.get("eyes", {}).get(e, {}).get("present", False)]
         if len(active) > 1:
@@ -9595,6 +9614,8 @@ class CV3DMainWindow(QMainWindow):
                 "output_plot_png": str(Path(output_pngs["rgl_3d"]).name),
                 "open_rgl_window": False,
                 "make_rgl_snapshot": True,
+                "facet_sphere_scale": report_facet_sphere_scale,
+                "facet_size_estimate": report_facet_size_estimate,
                 "status_file": status_rel,
                 "status_file_abs": str(self.analysis_folder / status_rel),
                 "stdout_file": stdout_rel,
@@ -10171,6 +10192,17 @@ class CV3DMainWindow(QMainWindow):
             return pages
 
         def image_cmd(path, x, y, w, h):
+            # Fit raster images into the requested PDF box without changing
+            # their aspect ratio. The previous square stretch distorted the
+            # 05C rgl snapshots because their native window is rectangular.
+            img = QImage(str(path))
+            if not img.isNull() and img.width() > 0 and img.height() > 0:
+                scale = min(float(w) / float(img.width()), float(h) / float(img.height()))
+                fit_w = float(img.width()) * scale
+                fit_h = float(img.height()) * scale
+                x = float(x) + (float(w) - fit_w) / 2.0
+                y = float(y) + (float(h) - fit_h) / 2.0
+                w, h = fit_w, fit_h
             return f"__CV3D_IMAGE__|{str(path).replace('|', '_')}|{x:.2f}|{y:.2f}|{w:.2f}|{h:.2f}"
 
         def rgl_snapshot_pages():
@@ -10187,10 +10219,30 @@ class CV3DMainWindow(QMainWindow):
             if not existing:
                 return pages
             cmds = new_page('05C rgl snapshots', 'Perspective 3D QC snapshots in the global coordinate system')
-            positions = [(55, 435), (320, 435), (55, 115), (320, 115)]
-            for (scope, p), (x, y) in zip(existing[:4], positions):
-                cmds.append(text_cmd(x, y + 245, scope, 10, 'F2'))
-                cmds.append(image_cmd(p, x, y, 220, 220))
+
+            # Use the available page area more efficiently. With two eyes the
+            # combined view gets a larger top panel and the individual eyes
+            # sit side-by-side below it. All images preserve their native
+            # aspect ratio via image_cmd().
+            if len(existing) >= 3:
+                layout = [
+                    (existing[0], 137, 445, 320, 250),
+                    (existing[1], 42, 155, 240, 190),
+                    (existing[2], 313, 155, 240, 190),
+                ]
+            elif len(existing) == 2:
+                layout = [
+                    (existing[0], 42, 300, 240, 200),
+                    (existing[1], 313, 300, 240, 200),
+                ]
+            else:
+                layout = [
+                    (existing[0], 97, 300, 400, 310),
+                ]
+
+            for (scope, p), x, y, w, h in layout:
+                cmds.append(text_cmd(x, y + h + 12, scope, 10, 'F2'))
+                cmds.append(image_cmd(p, x, y, w, h))
             pages.append(cmds)
             return pages
 

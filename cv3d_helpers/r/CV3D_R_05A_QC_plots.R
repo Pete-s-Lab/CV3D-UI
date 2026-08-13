@@ -16,7 +16,7 @@ safe_require("dplyr")
 safe_require("viridisLite")
 safe_require("rgl")
 
-SCRIPT_VERSION <- "0.1.14-normal-vector-toggle"
+SCRIPT_VERSION <- "0.1.15-facet-label-toggle"
 SCRIPT_NAME <- "CV3D_R_05A_QC_plots.R"
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
@@ -222,7 +222,7 @@ normal_method_label <- function(df) {
   method
 }
 
-plot_normals_png <- function(df, out_png, cv_id, eye, normal_length_facet_size_factor = 5.0, show_normals = TRUE) {
+plot_normals_png <- function(df, out_png, cv_id, eye, normal_length_facet_size_factor = 5.0, show_normals = TRUE, show_facet_labels = FALSE) {
   need_cols(df, c("x", "y", "z", "norm.x", "norm.y", "norm.z"), "Facet-normal table")
   proj_cols <- choose_projection(df)
   norm_cols <- switch(
@@ -267,6 +267,9 @@ plot_normals_png <- function(df, out_png, cv_id, eye, normal_length_facet_size_f
     segments(x0 = x, y0 = y, x1 = x_end, y1 = y_end, col = dir_cols, lwd = 1.5)
   }
   points(x, y, pch = 16, cex = cex, col = dir_cols)
+  if (isTRUE(show_facet_labels) && "facet_id" %in% names(df)) {
+    text(x, y, labels = as.character(df$facet_id), pos = 4, offset = 0.20, cex = 0.42, col = "black")
+  }
   key <- normal_axis_direction_key()
   legend(
     "topright",
@@ -289,14 +292,16 @@ plot_normals_png <- function(df, out_png, cv_id, eye, normal_length_facet_size_f
   invisible(out_png)
 }
 
-plot_labelled_metric_png <- function(df, out_png, cv_id, eye, value_col, value_label = value_col) {
-  need_cols(df, c("facet_id", "x", "y", "z", value_col), "Optic-parameter table")
+plot_labelled_metric_png <- function(df, out_png, cv_id, eye, value_col, value_label = value_col, show_facet_labels = FALSE) {
+  required <- c("x", "y", "z", value_col)
+  if (isTRUE(show_facet_labels)) required <- c("facet_id", required)
+  need_cols(df, required, "Optic-parameter table")
   proj_cols <- choose_projection(df)
   vals <- suppressWarnings(as.numeric(df[[value_col]]))
   mapped <- map_colors(vals)
   x <- suppressWarnings(as.numeric(df[[proj_cols[[1]]]]))
   y <- suppressWarnings(as.numeric(df[[proj_cols[[2]]]]))
-  facet_labels <- as.character(df$facet_id)
+  facet_labels <- if ("facet_id" %in% names(df)) as.character(df$facet_id) else rep("", nrow(df))
   size_vals <- if ("facet_size_smoothed" %in% names(df)) df$facet_size_smoothed else rep(NA_real_, length(x))
   cex <- point_cex_from_size(size_vals)
   pad_x <- max(diff(range(x, na.rm = TRUE)) * 0.10, 1e-6)
@@ -317,7 +322,9 @@ plot_labelled_metric_png <- function(df, out_png, cv_id, eye, value_col, value_l
     ylim = range(y, na.rm = TRUE) + c(-pad_y, pad_y)
   )
   points(x, y, pch = 16, cex = cex, col = mapped$cols)
-  text(x, y, labels = facet_labels, pos = 4, offset = 0.20, cex = 0.42, col = "black")
+  if (isTRUE(show_facet_labels)) {
+    text(x, y, labels = facet_labels, pos = 4, offset = 0.20, cex = 0.42, col = "black")
+  }
   colorbar_inset(vals, mapped$pal, value_label)
   mtext(sprintf("%s %s - 05A labelled metric (%s)", cv_id, eye, value_col), outer = FALSE, line = 1.2, cex = 1.05, font = 2)
   invisible(out_png)
@@ -430,7 +437,7 @@ open_optics_rgl <- function(df, cv_id, eye, facet_sphere_scale = 0, facet_size_e
   wait_for_rgl_close()
 }
 
-open_normals_rgl <- function(df, cv_id, eye, normal_length_facet_size_factor = 5.0, facet_sphere_scale = 0, facet_size_estimate = NA_real_, show_normals = TRUE) {
+open_normals_rgl <- function(df, cv_id, eye, normal_length_facet_size_factor = 5.0, facet_sphere_scale = 0, facet_size_estimate = NA_real_, show_normals = TRUE, show_facet_labels = FALSE) {
   need_cols(df, c("x", "y", "z", "norm.x", "norm.y", "norm.z"), "Facet-normal table")
   legacy_radius <- rep(compute_radius(df), nrow(df))
   radius <- resolve_facet_sphere_radius(df, facet_sphere_scale, facet_size_estimate, legacy_radius)
@@ -451,6 +458,11 @@ open_normals_rgl <- function(df, cv_id, eye, normal_length_facet_size_factor = 5
               aspect = "iso",
               box = TRUE)
   rgl::spheres3d(df$x, df$y, df$z, radius = radius, col = dir_cols)
+  if (isTRUE(show_facet_labels) && "facet_id" %in% names(df)) {
+    finite_radius <- radius[is.finite(radius) & radius > 0]
+    z_offset <- if (length(finite_radius) > 0) max(finite_radius) * 1.8 else compute_radius(df) * 1.8
+    rgl::texts3d(df$x, df$y, df$z + z_offset, texts = as.character(df$facet_id), cex = 0.8, color = "black")
+  }
   if (isTRUE(show_normals)) {
     message("05A normals rgl: drawing direction-coloured normal vectors in one batch")
     finite_segment <- is.finite(df$x) & is.finite(df$y) & is.finite(df$z) &
@@ -480,8 +492,10 @@ open_normals_rgl <- function(df, cv_id, eye, normal_length_facet_size_factor = 5
   message("05A normals rgl: window closed")
 }
 
-open_labelled_metric_rgl <- function(df, cv_id, eye, value_col, value_label = value_col, facet_sphere_scale = 0, facet_size_estimate = NA_real_) {
-  need_cols(df, c("facet_id", "x", "y", "z", value_col), "Optic-parameter table")
+open_labelled_metric_rgl <- function(df, cv_id, eye, value_col, value_label = value_col, facet_sphere_scale = 0, facet_size_estimate = NA_real_, show_facet_labels = FALSE) {
+  required <- c("x", "y", "z", value_col)
+  if (isTRUE(show_facet_labels)) required <- c("facet_id", required)
+  need_cols(df, required, "Optic-parameter table")
   legacy_radius <- rep(compute_radius(df), nrow(df))
   radius <- resolve_facet_sphere_radius(df, facet_sphere_scale, facet_size_estimate, legacy_radius)
   vals <- suppressWarnings(as.numeric(df[[value_col]]))
@@ -495,7 +509,9 @@ open_labelled_metric_rgl <- function(df, cv_id, eye, value_col, value_label = va
               aspect = "iso",
               box = TRUE)
   rgl::spheres3d(df$x, df$y, df$z, radius = radius, col = cols)
-  rgl::texts3d(df$x, df$y, df$z + z_offset, texts = as.character(df$facet_id), cex = 0.8, color = "black")
+  if (isTRUE(show_facet_labels)) {
+    rgl::texts3d(df$x, df$y, df$z + z_offset, texts = as.character(df$facet_id), cex = 0.8, color = "black")
+  }
   rgl::title3d(main = sprintf("%s %s - %s [%s]", cv_id, eye, value_label, value_col))
   wait_for_rgl_close()
 }
@@ -513,6 +529,7 @@ main <- function() {
   if (!is.finite(facet_sphere_scale) || facet_sphere_scale < 0) facet_sphere_scale <- 0
   facet_size_estimate <- suppressWarnings(as.numeric(task$facet_size_estimate %||% task$parameters$facet_size_estimate %||% NA_real_)[1])
   if (!is.finite(facet_size_estimate) || facet_size_estimate <= 0) facet_size_estimate <- NA_real_
+  show_facet_labels <- isTRUE(task$show_facet_labels %||% FALSE)
 
   if (plot_kind == "optics") {
     plot_optics_png(optics_df, out_png, cv_id, eye)
@@ -536,24 +553,24 @@ main <- function() {
     )[1])
     if (!is.finite(normal_length_facet_size_factor) || normal_length_facet_size_factor < 0) normal_length_facet_size_factor <- 5.0
     show_normals <- isTRUE(task$show_normals %||% TRUE)
-    plot_normals_png(normals_df, out_png, cv_id, eye, normal_length_facet_size_factor, show_normals)
+    plot_normals_png(normals_df, out_png, cv_id, eye, normal_length_facet_size_factor, show_normals, show_facet_labels)
     rgl_status <- "not_requested"
     if (isTRUE(task$open_rgl_window %||% FALSE)) {
       # Do not swallow native-rgl errors here. If anything fails after the
       # window is created, propagate it so the UI/status/log shows the actual
       # failing operation instead of silently closing the window.
-      open_normals_rgl(normals_df, cv_id, eye, normal_length_facet_size_factor, facet_sphere_scale, facet_size_estimate, show_normals)
+      open_normals_rgl(normals_df, cv_id, eye, normal_length_facet_size_factor, facet_sphere_scale, facet_size_estimate, show_normals, show_facet_labels)
       rgl_status <- "opened_and_closed"
     }
   } else if (plot_kind == "labelled_metric") {
     metric_col <- as.character(task$selected_metric_col %||% "")
     metric_label <- as.character(task$selected_metric_label %||% metric_col)
     if (!nzchar(metric_col)) stop("Task JSON is missing selected_metric_col for plot_kind labelled_metric.", call. = FALSE)
-    plot_labelled_metric_png(optics_df, out_png, cv_id, eye, metric_col, metric_label)
+    plot_labelled_metric_png(optics_df, out_png, cv_id, eye, metric_col, metric_label, show_facet_labels)
     rgl_status <- "not_requested"
     if (isTRUE(task$open_rgl_window %||% FALSE)) {
       rgl_status <- tryCatch({
-        open_labelled_metric_rgl(optics_df, cv_id, eye, metric_col, metric_label, facet_sphere_scale, facet_size_estimate)
+        open_labelled_metric_rgl(optics_df, cv_id, eye, metric_col, metric_label, facet_sphere_scale, facet_size_estimate, show_facet_labels)
         "opened_and_closed"
       }, error = function(e) {
         paste0("failed: ", conditionMessage(e))
@@ -579,7 +596,8 @@ main <- function() {
       facet_sphere_scale = facet_sphere_scale,
       facet_size_estimate = facet_size_estimate,
       normal_length_facet_size_factor = if (exists("normal_length_facet_size_factor")) normal_length_facet_size_factor else NULL,
-      show_normals = if (exists("show_normals")) show_normals else NULL
+      show_normals = if (exists("show_normals")) show_normals else NULL,
+      show_facet_labels = show_facet_labels
     )
   ))
 }
