@@ -15,8 +15,9 @@ safe_require("readr")
 safe_require("dplyr")
 safe_require("viridisLite")
 safe_require("rgl")
+safe_require("CV3D")
 
-SCRIPT_VERSION <- "0.1.15-facet-label-toggle"
+SCRIPT_VERSION <- "0.1.20-report-facet-values"
 SCRIPT_NAME <- "CV3D_R_05A_QC_plots.R"
 
 task <- jsonlite::fromJSON(task_json, simplifyVector = TRUE)
@@ -49,27 +50,45 @@ read_csv_safe <- function(path) {
   suppressMessages(readr::read_csv(path, show_col_types = FALSE))
 }
 
-choose_projection <- function(df) {
-  candidates <- list(
-    xy = c("x", "y"),
-    xz = c("x", "z"),
-    yz = c("y", "z")
-  )
-  best_name <- "xy"
-  best_score <- -Inf
-  for (nm in names(candidates)) {
-    cols <- candidates[[nm]]
-    if (!all(cols %in% names(df))) next
-    xr <- diff(range(df[[cols[[1]]]], na.rm = TRUE))
-    yr <- diff(range(df[[cols[[2]]]], na.rm = TRUE))
-    score <- xr * yr
-    if (!is.finite(score)) score <- -Inf
-    if (score > best_score) {
-      best_score <- score
-      best_name <- nm
-    }
+cv3d_standard_face_on_view <- function(df) {
+  need_cols(df, c("x", "y", "z", "norm.x", "norm.y", "norm.z"), "Face-on plotting table")
+  if (!"view_eye_face_on" %in% getNamespaceExports("CV3D")) {
+    stop("The installed CV3D package does not export view_eye_face_on(). Reinstall/update CV3D first.", call. = FALSE)
   }
-  candidates[[best_name]]
+  tmp <- tempfile(fileext = ".pdf")
+  grDevices::pdf(tmp, width = 4, height = 4)
+  dev_open <- TRUE
+  on.exit({
+    if (isTRUE(dev_open)) try(grDevices::dev.off(), silent = TRUE)
+    try(unlink(tmp), silent = TRUE)
+  }, add = TRUE)
+  view <- CV3D::view_eye_face_on(
+    df, projection = "2D", reverse = FALSE, long_axis_vertical = TRUE,
+    col = NA, pch = NA, cex = 0, axes = FALSE, xlab = "", ylab = ""
+  )
+  grDevices::dev.off()
+  dev_open <- FALSE
+  unlink(tmp)
+  view
+}
+
+face_on_xy <- function(df, view = NULL) {
+  if (is.null(view)) view <- cv3d_standard_face_on_view(df)
+  xy <- as.matrix(view$projected_coordinates)
+  if (ncol(xy) != 2 || nrow(xy) != nrow(df)) {
+    stop("view_eye_face_on() returned invalid projected coordinates.", call. = FALSE)
+  }
+  storage.mode(xy) <- "double"
+  colnames(xy) <- c("Face-on x", "Face-on y")
+  list(xy = xy, view = view)
+}
+
+set_cv3d_standard_rgl_view <- function(view, zoom = 0.82) {
+  user_matrix <- as.matrix(view$userMatrix)
+  if (!all(dim(user_matrix) == c(4, 4)) || any(!is.finite(user_matrix))) {
+    stop("view_eye_face_on() returned an invalid rgl userMatrix.", call. = FALSE)
+  }
+  rgl::view3d(userMatrix = user_matrix, fov = 0, zoom = zoom, scale = c(1, 1, 1))
 }
 
 rescale01 <- function(x) {
@@ -134,42 +153,33 @@ colorbar_inset <- function(values, pal, label) {
   par(xpd = FALSE)
 }
 
-plot_metric_panel <- function(df, proj_cols, value_col, title_text, point_cex, pch = 16) {
-  need_cols(df, c(proj_cols, value_col), title_text)
+plot_metric_panel <- function(df, x, y, value_col, title_text, point_cex, pch = 16) {
+  need_cols(df, value_col, title_text)
   vals <- suppressWarnings(as.numeric(df[[value_col]]))
   mapped <- map_colors(vals)
-  x <- suppressWarnings(as.numeric(df[[proj_cols[[1]]]]))
-  y <- suppressWarnings(as.numeric(df[[proj_cols[[2]]]]))
   pad_x <- max(diff(range(x, na.rm = TRUE)) * 0.08, 1e-6)
   pad_y <- max(diff(range(y, na.rm = TRUE)) * 0.08, 1e-6)
-  plot(
-    x, y,
-    asp = 1,
-    pch = pch,
-    cex = point_cex,
-    col = mapped$cols,
-    xlab = proj_cols[[1]],
-    ylab = proj_cols[[2]],
-    main = title_text,
-    xlim = range(x, na.rm = TRUE) + c(-pad_x, pad_x),
-    ylim = range(y, na.rm = TRUE) + c(-pad_y, pad_y)
-  )
+  plot(x, y, asp = 1, pch = pch, cex = point_cex, col = mapped$cols,
+       xlab = "Face-on x (um)", ylab = "Face-on y (um)", main = title_text,
+       xlim = range(x, na.rm = TRUE) + c(-pad_x, pad_x),
+       ylim = range(y, na.rm = TRUE) + c(-pad_y, pad_y))
   colorbar_inset(vals, mapped$pal, title_text)
 }
 
 plot_optics_png <- function(df, out_png, cv_id, eye) {
-  need_cols(df, c("x", "y", "z", "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd"), "Optic-parameter table")
-  proj_cols <- choose_projection(df)
+  need_cols(df, c("x", "y", "z", "norm.x", "norm.y", "norm.z", "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd"), "Optic-parameter table")
+  fo <- face_on_xy(df)
+  x <- fo$xy[, 1]; y <- fo$xy[, 2]
   cex <- point_cex_from_size(df$facet_size_smoothed)
   dir.create(dirname(out_png), recursive = TRUE, showWarnings = FALSE)
   png(out_png, width = 2200, height = 1800, res = 220)
   op <- par(mfrow = c(2, 2), mar = c(4, 4, 4, 6), oma = c(0, 0, 2, 0))
   on.exit({par(op); dev.off()}, add = TRUE)
-  plot_metric_panel(df, proj_cols, "facet_size_smoothed", "Facet size", cex)
-  plot_metric_panel(df, proj_cols, "interfacet_angle_deg", "IF angle (deg)", cex)
-  plot_metric_panel(df, proj_cols, "eye_parameter", "Eye parameter", cex)
-  plot_metric_panel(df, proj_cols, "acuity_cpd", "Acuity (cpd)", cex)
-  mtext(sprintf("%s %s - 05A optic parameters (%s projection)", cv_id, eye, paste(proj_cols, collapse = "/")), outer = TRUE, cex = 1.2, font = 2)
+  plot_metric_panel(df, x, y, "facet_size_smoothed", "Facet size", cex)
+  plot_metric_panel(df, x, y, "interfacet_angle_deg", "IF angle (deg)", cex)
+  plot_metric_panel(df, x, y, "eye_parameter", "Eye parameter", cex)
+  plot_metric_panel(df, x, y, "acuity_cpd", "Acuity (cpd)", cex)
+  mtext(sprintf("%s %s - 05A optic parameters, standard CV3D face-on view", cv_id, eye), outer = TRUE, cex = 1.2, font = 2)
   invisible(out_png)
 }
 
@@ -204,6 +214,7 @@ normal_axis_direction_key <- function() {
   list(labels = rownames(axes), cols = normal_direction_colors(axes))
 }
 
+
 normal_method_label <- function(df) {
   if (!"normal_method" %in% names(df)) return("facet normals")
   method <- unique(stats::na.omit(as.character(df$normal_method)))
@@ -224,107 +235,65 @@ normal_method_label <- function(df) {
 
 plot_normals_png <- function(df, out_png, cv_id, eye, normal_length_facet_size_factor = 5.0, show_normals = TRUE, show_facet_labels = FALSE) {
   need_cols(df, c("x", "y", "z", "norm.x", "norm.y", "norm.z"), "Facet-normal table")
-  proj_cols <- choose_projection(df)
-  norm_cols <- switch(
-    paste(proj_cols, collapse = "/"),
-    "x/y" = c("norm.x", "norm.y"),
-    "x/z" = c("norm.x", "norm.z"),
-    c("norm.y", "norm.z")
-  )
-  x <- suppressWarnings(as.numeric(df[[proj_cols[[1]]]]))
-  y <- suppressWarnings(as.numeric(df[[proj_cols[[2]]]]))
+  fo <- face_on_xy(df)
+  view <- fo$view
+  x <- fo$xy[, 1]; y <- fo$xy[, 2]
   nrm <- normalize_normals(df)
   dir_cols <- normal_direction_colors(nrm)
-  norm_map <- c("norm.x" = 1, "norm.y" = 2, "norm.z" = 3)
-  u <- nrm[, norm_map[[norm_cols[[1]]]]]
-  v <- nrm[, norm_map[[norm_cols[[2]]]]]
+  u <- as.numeric(nrm %*% as.numeric(view$x_direction))
+  v <- as.numeric(nrm %*% as.numeric(view$y_direction))
   size <- if ("facet_size_smoothed" %in% names(df)) suppressWarnings(as.numeric(df$facet_size_smoothed)) else rep(NA_real_, length(x))
   normal_length <- normal_lengths_from_facet_size(df, normal_length_facet_size_factor)
   cex <- point_cex_from_size(size, base = 1.0)
-  x_end <- x + u * normal_length
-  y_end <- y + v * normal_length
+  x_end <- x + u * normal_length; y_end <- y + v * normal_length
   plot_x <- if (isTRUE(show_normals)) c(x, x_end) else x
   plot_y <- if (isTRUE(show_normals)) c(y, y_end) else y
   pad_x <- max(diff(range(plot_x, na.rm = TRUE)) * 0.08, 1e-6)
   pad_y <- max(diff(range(plot_y, na.rm = TRUE)) * 0.08, 1e-6)
   method_text <- normal_method_label(df)
-
   dir.create(dirname(out_png), recursive = TRUE, showWarnings = FALSE)
   png(out_png, width = 1900, height = 1650, res = 220)
   op <- par(mar = c(4, 4, 4.5, 4))
   on.exit({par(op); dev.off()}, add = TRUE)
-  plot(
-    x, y,
-    type = "n",
-    asp = 1,
-    xlab = proj_cols[[1]],
-    ylab = proj_cols[[2]],
-    main = sprintf("%s %s - 05A %s (%s projection)", cv_id, eye, method_text, paste(proj_cols, collapse = "/")),
-    xlim = range(plot_x, na.rm = TRUE) + c(-pad_x, pad_x),
-    ylim = range(plot_y, na.rm = TRUE) + c(-pad_y, pad_y)
-  )
-  if (isTRUE(show_normals)) {
-    segments(x0 = x, y0 = y, x1 = x_end, y1 = y_end, col = dir_cols, lwd = 1.5)
-  }
+  plot(x, y, type = "n", asp = 1, xlab = "Face-on x (um)", ylab = "Face-on y (um)",
+       main = sprintf("%s %s - 05A %s, standard CV3D face-on view", cv_id, eye, method_text),
+       xlim = range(plot_x, na.rm = TRUE) + c(-pad_x, pad_x),
+       ylim = range(plot_y, na.rm = TRUE) + c(-pad_y, pad_y))
+  if (isTRUE(show_normals)) segments(x0 = x, y0 = y, x1 = x_end, y1 = y_end, col = dir_cols, lwd = 1.5)
   points(x, y, pch = 16, cex = cex, col = dir_cols)
   if (isTRUE(show_facet_labels) && "facet_id" %in% names(df)) {
     text(x, y, labels = as.character(df$facet_id), pos = 4, offset = 0.20, cex = 0.42, col = "black")
   }
   key <- normal_axis_direction_key()
-  legend(
-    "topright",
-    legend = key$labels,
-    pch = 16,
-    col = key$cols,
-    title = "Normal direction",
-    cex = 0.78,
-    bty = "n"
-  )
-  detail <- if (isTRUE(show_normals)) {
-    sprintf("Normal length: %.4g × facet size", normal_length_facet_size_factor)
-  } else {
-    "Normal vectors hidden"
-  }
-  mtext(
-    sprintf("RGB = scaled (nx, ny, nz); neighbouring facet colours should change smoothly. %s", detail),
-    side = 3, line = 0.35, cex = 0.72
-  )
+  legend("topright", legend = key$labels, pch = 16, col = key$cols, title = "Normal direction", cex = 0.78, bty = "n")
+  detail <- if (isTRUE(show_normals)) sprintf("Normal length: %.4g x facet size", normal_length_facet_size_factor) else "Normal vectors hidden"
+  mtext(sprintf("RGB = scaled original (nx, ny, nz); only the view is rotated face-on. %s", detail), side = 3, line = 0.35, cex = 0.72)
   invisible(out_png)
 }
 
 plot_labelled_metric_png <- function(df, out_png, cv_id, eye, value_col, value_label = value_col, show_facet_labels = FALSE) {
-  required <- c("x", "y", "z", value_col)
+  required <- c("x", "y", "z", "norm.x", "norm.y", "norm.z", value_col)
   if (isTRUE(show_facet_labels)) required <- c("facet_id", required)
   need_cols(df, required, "Optic-parameter table")
-  proj_cols <- choose_projection(df)
+  fo <- face_on_xy(df)
+  x <- fo$xy[, 1]; y <- fo$xy[, 2]
   vals <- suppressWarnings(as.numeric(df[[value_col]]))
   mapped <- map_colors(vals)
-  x <- suppressWarnings(as.numeric(df[[proj_cols[[1]]]]))
-  y <- suppressWarnings(as.numeric(df[[proj_cols[[2]]]]))
   facet_labels <- if ("facet_id" %in% names(df)) as.character(df$facet_id) else rep("", nrow(df))
   size_vals <- if ("facet_size_smoothed" %in% names(df)) df$facet_size_smoothed else rep(NA_real_, length(x))
   cex <- point_cex_from_size(size_vals)
   pad_x <- max(diff(range(x, na.rm = TRUE)) * 0.10, 1e-6)
   pad_y <- max(diff(range(y, na.rm = TRUE)) * 0.10, 1e-6)
-
   dir.create(dirname(out_png), recursive = TRUE, showWarnings = FALSE)
   png(out_png, width = 2200, height = 1800, res = 220)
   op <- par(mar = c(4, 4, 4, 6))
   on.exit({par(op); dev.off()}, add = TRUE)
-  plot(
-    x, y,
-    type = "n",
-    asp = 1,
-    xlab = proj_cols[[1]],
-    ylab = proj_cols[[2]],
-    main = sprintf("%s (%s projection)", value_label, paste(proj_cols, collapse = "/")),
-    xlim = range(x, na.rm = TRUE) + c(-pad_x, pad_x),
-    ylim = range(y, na.rm = TRUE) + c(-pad_y, pad_y)
-  )
+  plot(x, y, type = "n", asp = 1, xlab = "Face-on x (um)", ylab = "Face-on y (um)",
+       main = sprintf("%s - standard CV3D face-on view", value_label),
+       xlim = range(x, na.rm = TRUE) + c(-pad_x, pad_x),
+       ylim = range(y, na.rm = TRUE) + c(-pad_y, pad_y))
   points(x, y, pch = 16, cex = cex, col = mapped$cols)
-  if (isTRUE(show_facet_labels)) {
-    text(x, y, labels = facet_labels, pos = 4, offset = 0.20, cex = 0.42, col = "black")
-  }
+  if (isTRUE(show_facet_labels)) text(x, y, labels = facet_labels, pos = 4, offset = 0.20, cex = 0.42, col = "black")
   colorbar_inset(vals, mapped$pal, value_label)
   mtext(sprintf("%s %s - 05A labelled metric (%s)", cv_id, eye, value_col), outer = FALSE, line = 1.2, cex = 1.05, font = 2)
   invisible(out_png)
@@ -407,31 +376,25 @@ normal_lengths_from_facet_size <- function(df, factor = 5.0) {
 }
 
 open_optics_rgl <- function(df, cv_id, eye, facet_sphere_scale = 0, facet_size_estimate = NA_real_) {
-  need_cols(df, c("x", "y", "z", "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd"), "Optic-parameter table")
+  need_cols(df, c("x", "y", "z", "norm.x", "norm.y", "norm.z", "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd"), "Optic-parameter table")
+  view <- cv3d_standard_face_on_view(df)
   legacy_radius <- compute_facet_radius(df)
   sphere_radius <- resolve_facet_sphere_radius(df, facet_sphere_scale, facet_size_estimate, legacy_radius)
   metrics <- list(
     list(col = "facet_size_smoothed", title = "Facet size"),
     list(col = "interfacet_angle_deg", title = "IF angle (deg)"),
     list(col = "eye_parameter", title = "Eye parameter"),
-    list(col = "acuity_cpd", title = "acuity_cpd")
+    list(col = "acuity_cpd", title = "Acuity (cpd)")
   )
   rgl::open3d(useNULL = FALSE)
   try(rgl::par3d(windowRect = c(80, 80, 1900, 1500)), silent = TRUE)
-  if ("mfrow3d" %in% getNamespaceExports("rgl")) {
-    rgl::mfrow3d(2, 2, sharedMouse = TRUE)
-  }
+  if ("mfrow3d" %in% getNamespaceExports("rgl")) rgl::mfrow3d(2, 2, sharedMouse = TRUE)
   for (m in metrics) {
     vals <- suppressWarnings(as.numeric(df[[m$col]]))
     cols <- map_colors(vals)$cols
-    rgl::plot3d(df$x, df$y, df$z,
-                type = "n",
-                xlab = "x", ylab = "y", zlab = "z",
-                aspect = "iso",
-                box = TRUE)
-    rgl::spheres3d(df$x, df$y, df$z,
-                   radius = sphere_radius,
-                   col = cols)
+    rgl::plot3d(df$x, df$y, df$z, type = "n", xlab = "x", ylab = "y", zlab = "z", aspect = "iso", box = TRUE)
+    rgl::spheres3d(df$x, df$y, df$z, radius = sphere_radius, col = cols)
+    set_cv3d_standard_rgl_view(view)
     rgl::title3d(main = sprintf("%s %s - %s", cv_id, eye, m$title))
   }
   wait_for_rgl_close()
@@ -439,6 +402,7 @@ open_optics_rgl <- function(df, cv_id, eye, facet_sphere_scale = 0, facet_size_e
 
 open_normals_rgl <- function(df, cv_id, eye, normal_length_facet_size_factor = 5.0, facet_sphere_scale = 0, facet_size_estimate = NA_real_, show_normals = TRUE, show_facet_labels = FALSE) {
   need_cols(df, c("x", "y", "z", "norm.x", "norm.y", "norm.z"), "Facet-normal table")
+  view <- cv3d_standard_face_on_view(df)
   legacy_radius <- rep(compute_radius(df), nrow(df))
   radius <- resolve_facet_sphere_radius(df, facet_sphere_scale, facet_size_estimate, legacy_radius)
   nrm <- normalize_normals(df)
@@ -448,71 +412,59 @@ open_normals_rgl <- function(df, cv_id, eye, normal_length_facet_size_factor = 5
   x2 <- df$x + nrm[, 1] * normal_length
   y2 <- df$y + nrm[, 2] * normal_length
   z2 <- df$z + nrm[, 3] * normal_length
-
-  message("05A normals rgl: opening native device")
   rgl::open3d(windowRect = c(120, 120, 1500, 1200))
-  message("05A normals rgl: drawing direction-coloured facet positions")
-  rgl::plot3d(df$x, df$y, df$z,
-              type = "n",
-              xlab = "x", ylab = "y", zlab = "z",
-              aspect = "iso",
-              box = TRUE)
+  rgl::plot3d(df$x, df$y, df$z, type = "n", xlab = "x", ylab = "y", zlab = "z", aspect = "iso", box = TRUE)
   rgl::spheres3d(df$x, df$y, df$z, radius = radius, col = dir_cols)
   if (isTRUE(show_facet_labels) && "facet_id" %in% names(df)) {
     finite_radius <- radius[is.finite(radius) & radius > 0]
-    z_offset <- if (length(finite_radius) > 0) max(finite_radius) * 1.8 else compute_radius(df) * 1.8
-    rgl::texts3d(df$x, df$y, df$z + z_offset, texts = as.character(df$facet_id), cex = 0.8, color = "black")
+    offset <- if (length(finite_radius) > 0) max(finite_radius) * 1.8 else compute_radius(df) * 1.8
+    rgl::texts3d(df$x + view$view_direction[[1]] * offset,
+                 df$y + view$view_direction[[2]] * offset,
+                 df$z + view$view_direction[[3]] * offset,
+                 texts = as.character(df$facet_id), cex = 0.8, color = "black")
   }
   if (isTRUE(show_normals)) {
-    message("05A normals rgl: drawing direction-coloured normal vectors in one batch")
-    finite_segment <- is.finite(df$x) & is.finite(df$y) & is.finite(df$z) &
-                      is.finite(x2) & is.finite(y2) & is.finite(z2)
-    idx <- which(finite_segment)
+    idx <- which(is.finite(df$x) & is.finite(df$y) & is.finite(df$z) & is.finite(x2) & is.finite(y2) & is.finite(z2))
     if (length(idx) > 0) {
-      rgl::segments3d(
-        x = as.vector(rbind(df$x[idx], x2[idx])),
-        y = as.vector(rbind(df$y[idx], y2[idx])),
-        z = as.vector(rbind(df$z[idx], z2[idx])),
-        col = rep(dir_cols[idx], each = 2),
-        lwd = 2
-      )
+      rgl::segments3d(x = as.vector(rbind(df$x[idx], x2[idx])),
+                      y = as.vector(rbind(df$y[idx], y2[idx])),
+                      z = as.vector(rbind(df$z[idx], z2[idx])),
+                      col = rep(dir_cols[idx], each = 2), lwd = 2)
     }
-  } else {
-    message("05A normals rgl: normal vectors hidden; showing direction-coloured facet spheres only")
   }
-  message("05A normals rgl: adding title")
+  set_cv3d_standard_rgl_view(view)
   title_text <- if (isTRUE(show_normals)) {
-    sprintf("%s %s - %s, direction-coloured normals (normal length %.4g x facet size)", cv_id, eye, method_text, normal_length_facet_size_factor)
+    sprintf("%s %s - %s, face-on normals (normal length %.4g x facet size)", cv_id, eye, method_text, normal_length_facet_size_factor)
   } else {
-    sprintf("%s %s - %s, normal direction by facet colour (vectors hidden)", cv_id, eye, method_text)
+    sprintf("%s %s - %s, face-on normal direction (vectors hidden)", cv_id, eye, method_text)
   }
   rgl::title3d(main = title_text)
-  message("05A normals rgl: entering keep-open wait; close the rgl window to continue")
   wait_for_rgl_close()
-  message("05A normals rgl: window closed")
 }
 
 open_labelled_metric_rgl <- function(df, cv_id, eye, value_col, value_label = value_col, facet_sphere_scale = 0, facet_size_estimate = NA_real_, show_facet_labels = FALSE) {
-  required <- c("x", "y", "z", value_col)
+  required <- c("x", "y", "z", "norm.x", "norm.y", "norm.z", value_col)
   if (isTRUE(show_facet_labels)) required <- c("facet_id", required)
   need_cols(df, required, "Optic-parameter table")
+  view <- cv3d_standard_face_on_view(df)
   legacy_radius <- rep(compute_radius(df), nrow(df))
   radius <- resolve_facet_sphere_radius(df, facet_sphere_scale, facet_size_estimate, legacy_radius)
   vals <- suppressWarnings(as.numeric(df[[value_col]]))
   cols <- map_colors(vals)$cols
-  z_offset <- max(radius[is.finite(radius)], na.rm = TRUE) * 1.8
   rgl::open3d(useNULL = FALSE)
   try(rgl::par3d(windowRect = c(80, 80, 1800, 1400)), silent = TRUE)
-  rgl::plot3d(df$x, df$y, df$z,
-              type = "n",
-              xlab = "x", ylab = "y", zlab = "z",
-              aspect = "iso",
-              box = TRUE)
+  rgl::plot3d(df$x, df$y, df$z, type = "n", xlab = "x", ylab = "y", zlab = "z", aspect = "iso", box = TRUE)
   rgl::spheres3d(df$x, df$y, df$z, radius = radius, col = cols)
   if (isTRUE(show_facet_labels)) {
-    rgl::texts3d(df$x, df$y, df$z + z_offset, texts = as.character(df$facet_id), cex = 0.8, color = "black")
+    finite_radius <- radius[is.finite(radius) & radius > 0]
+    offset <- if (length(finite_radius) > 0) max(finite_radius) * 1.8 else compute_radius(df) * 1.8
+    rgl::texts3d(df$x + view$view_direction[[1]] * offset,
+                 df$y + view$view_direction[[2]] * offset,
+                 df$z + view$view_direction[[3]] * offset,
+                 texts = as.character(df$facet_id), cex = 0.8, color = "black")
   }
-  rgl::title3d(main = sprintf("%s %s - %s [%s]", cv_id, eye, value_label, value_col))
+  set_cv3d_standard_rgl_view(view)
+  rgl::title3d(main = sprintf("%s %s - %s [%s], standard face-on", cv_id, eye, value_label, value_col))
   wait_for_rgl_close()
 }
 
@@ -576,6 +528,29 @@ main <- function() {
         paste0("failed: ", conditionMessage(e))
       })
     }
+  } else if (plot_kind == "facet_value_report") {
+    metric_cols <- as.character(unlist(task$selected_metric_cols %||% character(0), use.names = FALSE))
+    metric_labels <- as.character(unlist(task$selected_metric_labels %||% metric_cols, use.names = FALSE))
+    out_pngs <- as.character(unlist(task$output_plot_pngs_abs %||% character(0), use.names = FALSE))
+    if (length(metric_cols) < 1L) stop("Task JSON is missing selected_metric_cols for plot_kind facet_value_report.", call. = FALSE)
+    if (length(metric_labels) != length(metric_cols)) stop("selected_metric_labels must match selected_metric_cols.", call. = FALSE)
+    if (length(out_pngs) != length(metric_cols)) stop("output_plot_pngs_abs must match selected_metric_cols.", call. = FALSE)
+    for (ii in seq_along(metric_cols)) {
+      plot_labelled_metric_png(
+        optics_df, out_pngs[[ii]], cv_id, eye,
+        metric_cols[[ii]], metric_labels[[ii]], FALSE
+      )
+    }
+    normals_out <- as.character(task$report_normals_output_png_abs %||% "")
+    if (nzchar(normals_out)) {
+      normals_path <- normalizePath(task$input_facet_normals_abs, winslash = "/", mustWork = TRUE)
+      normals_df <- read_csv_safe(normals_path)
+      if (!"facet_size_smoothed" %in% names(normals_df) && "facet_size_smoothed" %in% names(optics_df) && "facet_id" %in% names(normals_df) && "facet_id" %in% names(optics_df)) {
+        normals_df <- normals_df %>% dplyr::left_join(optics_df %>% dplyr::select(dplyr::any_of(c("facet_id", "facet_size_smoothed"))), by = "facet_id")
+      }
+      plot_normals_png(normals_df, normals_out, cv_id, eye, 5.0, TRUE, FALSE)
+    }
+    rgl_status <- "not_requested"
   } else {
     stop("Unknown plot_kind in task JSON: ", plot_kind, call. = FALSE)
   }

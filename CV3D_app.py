@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtCore import Qt, QUrl, QTimer
     from PySide6.QtGui import QDesktopServices, QImage
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
@@ -34,9 +34,14 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.119"
+APP_VERSION = "0.1.124"
 
 CHANGELOG = [
+    "0.1.124: Fixed QC PDF facet-value report generation, auto-opens plot PNGs, and keeps rgl inspection processes in the background so the UI remains responsive.",
+    "0.1.123: Standardised 05A/04B face-on QC views via view_eye_face_on, moved disabled-button reasons to tooltips, added all face-on facet-value maps to the QC PDF, kept neighbour-QC variables out of Choose facet value, and renamed Optics overview panel.",
+    "0.1.122: Matched Choose facet value plots to the established Eye Workflow projection/camera orientation, retained the original normal-direction colours, and added a 04B Neighbours QC plot button on Eye Workflow.",
+    "0.1.121: Restored the established original-coordinate normal-direction colours while retaining the 0.1.120 face-on plotting geometry.",
+    "0.1.120: Made Choose facet value 2D/3D QC views face-on using a PCA-aligned eye frame and kept both normal plots direction-coloured in that same frame.",
     "0.1.119: Added dedicated 04B edge-aware neighbour selection with 80-105 degree edge-threshold comparison, stored neighbour output, and 05A consumption of the selected neighbour graph.",
     "0.1.118: Fixed the double-click launcher so pythonw starts CV3D with a normal visible GUI window while helper subprocesses remain console-free.",
     "0.1.117: Suppressed Windows console creation for external helper processes and cached successful CV3D R-package validation for the app session to remove the redundant Rscript check before every R action.",
@@ -791,6 +796,7 @@ def eye_file_map(cv_id: str, eye: str) -> Dict[str, str]:
         "neighbours_file": eye_rel_path(eye, f"04B_{cv_id}_{eye}_neighbours.csv"),
         "shadow_removed_links_file": eye_rel_path(eye, f"04B_{cv_id}_{eye}_angle_shadow_removed_links.csv"),
         "edge_threshold_comparison_plot_file": eye_inspection_rel_path(eye, f"04B_{cv_id}_{eye}_edge_detection_threshold_comparison.png"),
+        "neighbours_qc_plot_file": eye_inspection_rel_path(eye, f"04B_{cv_id}_{eye}_neighbours_QC.png"),
 
         "r_step05a_task_file": eye_json_rel_path(eye, f"05A_{cv_id}_{eye}_R_task.json"),
         "r_step05a_status_file": eye_json_rel_path(eye, f"05A_{cv_id}_{eye}_R_status.json"),
@@ -1938,6 +1944,7 @@ class CV3DMainWindow(QMainWindow):
         self.status: Optional[Dict[str, Any]] = None
         self.registry: Optional[Dict[str, Any]] = None
         self._updating_dataset_selector = False
+        self._background_plot_jobs: List[Dict[str, Any]] = []
         # R namespace availability only needs to be verified once per Rscript
         # executable during a CV3D session. Re-check after the configured
         # executable changes or after an explicit package installation/update.
@@ -2045,6 +2052,134 @@ class CV3DMainWindow(QMainWindow):
     def start_background_process(self, cmd, **kwargs):
         """Start an external helper without creating a Windows console window."""
         return subprocess.Popen(cmd, **self.no_console_process_kwargs(kwargs))
+
+    def launch_background_plot_job(
+        self,
+        cmd,
+        *,
+        cwd: Path,
+        stdout_path: Path,
+        stderr_path: Path,
+        launch_path: Path,
+        png_paths: List[Path],
+        description: str,
+    ) -> bool:
+        """Run an rgl-capable plot helper without blocking the Qt event loop.
+
+        The R helper may deliberately remain alive while a native rgl window is
+        open.  The UI therefore polls the child process instead of waiting for
+        it synchronously.  Newly written PNGs are opened as soon as they appear,
+        while the rgl process can continue independently until its window is
+        closed by the user.
+        """
+        stdout_path = Path(stdout_path)
+        stderr_path = Path(stderr_path)
+        launch_path = Path(launch_path)
+        png_paths = [Path(x) for x in png_paths]
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        launch_path.parent.mkdir(parents=True, exist_ok=True)
+
+        old_signatures = {}
+        for path in png_paths:
+            try:
+                old_signatures[str(path)] = (path.stat().st_mtime_ns, path.stat().st_size) if path.exists() else None
+            except Exception:
+                old_signatures[str(path)] = None
+
+        out = None
+        err = None
+        try:
+            out = stdout_path.open("w", encoding="utf-8", errors="replace")
+            err = stderr_path.open("w", encoding="utf-8", errors="replace")
+            process = self.start_background_process(cmd, cwd=str(cwd), stdout=out, stderr=err)
+        except Exception as e:
+            if out is not None:
+                out.close()
+            if err is not None:
+                err.close()
+            QMessageBox.warning(self, f"{description} launch failed", str(e))
+            return False
+
+        with launch_path.open("a", encoding="utf-8") as f:
+            f.write(f"\nBackground process ID:\n{process.pid}\n")
+
+        job: Dict[str, Any] = {
+            "process": process,
+            "stdout": out,
+            "stderr": err,
+            "timer": None,
+            "png_paths": png_paths,
+            "opened": set(),
+            "old_signatures": old_signatures,
+            "launch_path": launch_path,
+            "description": description,
+        }
+
+        timer = QTimer(self)
+        timer.setInterval(250)
+        job["timer"] = timer
+
+        def poll_job() -> None:
+            for path in png_paths:
+                key = str(path)
+                if key in job["opened"] or not path.exists():
+                    continue
+                try:
+                    sig = (path.stat().st_mtime_ns, path.stat().st_size)
+                except Exception:
+                    continue
+                if old_signatures.get(key) != sig:
+                    if self.open_local_path(path, f"{description} PNG"):
+                        job["opened"].add(key)
+
+            return_code = process.poll()
+            if return_code is None:
+                return
+
+            # One final poll catches PNGs written immediately before process exit.
+            for path in png_paths:
+                key = str(path)
+                if key in job["opened"] or not path.exists():
+                    continue
+                try:
+                    sig = (path.stat().st_mtime_ns, path.stat().st_size)
+                except Exception:
+                    continue
+                if old_signatures.get(key) != sig:
+                    if self.open_local_path(path, f"{description} PNG"):
+                        job["opened"].add(key)
+
+            timer.stop()
+            try:
+                out.close()
+            except Exception:
+                pass
+            try:
+                err.close()
+            except Exception:
+                pass
+            try:
+                with launch_path.open("a", encoding="utf-8") as f:
+                    f.write(f"\nExit code:\n{return_code}\n")
+            except Exception:
+                pass
+            if job in self._background_plot_jobs:
+                self._background_plot_jobs.remove(job)
+            self.refresh_all()
+            if return_code != 0:
+                QMessageBox.warning(
+                    self,
+                    f"{description} failed",
+                    f"The background plotting process exited with code {return_code}.\n\n"
+                    f"stdout: {stdout_path}\nstderr: {stderr_path}",
+                )
+
+        timer.timeout.connect(poll_job)
+        self._background_plot_jobs.append(job)
+        timer.start()
+        QApplication.processEvents()
+        return True
 
     # ---------- UI builders ----------
 
@@ -2191,6 +2326,7 @@ class CV3DMainWindow(QMainWindow):
         self.local_height_3d_plot_buttons: Dict[str, QPushButton] = {}
         self.facet_candidate_plot_buttons: Dict[str, QPushButton] = {}
         self.facet_position_plot_buttons: Dict[str, QPushButton] = {}
+        self.neighbour_qc_plot_buttons: Dict[str, QPushButton] = {}
 
         for col, eye in enumerate(EYES):
             eye_box = QGroupBox(f"{eye} workflow")
@@ -2256,6 +2392,11 @@ class CV3DMainWindow(QMainWindow):
             facet_positions_plot_btn.clicked.connect(lambda _, e=eye: self.plot_facet_points_on_local_heights(e, "facet_positions"))
             self.facet_position_plot_buttons[eye] = facet_positions_plot_btn
             v.addWidget(facet_positions_plot_btn)
+
+            neighbour_qc_btn = QPushButton(f"Neighbours QC: {eye}")
+            neighbour_qc_btn.clicked.connect(lambda _, e=eye: self.plot_neighbours_qc(e))
+            self.neighbour_qc_plot_buttons[eye] = neighbour_qc_btn
+            v.addWidget(neighbour_qc_btn)
 
             grid.addWidget(eye_box, 0, col)
         layout.addLayout(grid)
@@ -2327,7 +2468,6 @@ class CV3DMainWindow(QMainWindow):
         grid = QGridLayout()
         self.r_analysis_labels: Dict[str, Dict[str, QLabel]] = {eye: {} for eye in EYES}
         self.r_analysis_buttons: Dict[str, Dict[str, QPushButton]] = {eye: {} for eye in EYES}
-        self.r_analysis_button_reason_labels: Dict[str, Dict[str, QLabel]] = {eye: {} for eye in EYES}
         self.r_analysis_plot_buttons: Dict[str, Dict[str, QPushButton]] = {eye: {} for eye in EYES}
 
         analysis_specs = [
@@ -2345,16 +2485,10 @@ class CV3DMainWindow(QMainWindow):
                 label.setWordWrap(True)
                 btn = QPushButton(button_text)
                 btn.clicked.connect(lambda _, e=eye, f=func: f(e))
-                reason_label = QLabel("")
-                reason_label.setWordWrap(True)
-                reason_label.setStyleSheet("color: #7a3b00; font-size: 11px; margin-left: 8px;")
-                reason_label.hide()
                 self.r_analysis_labels[eye][step] = label
                 self.r_analysis_buttons[eye][step] = btn
-                self.r_analysis_button_reason_labels[eye][step] = reason_label
                 v.addWidget(label)
                 v.addWidget(btn)
-                v.addWidget(reason_label)
 
             plot_separator = QFrame()
             plot_separator.setFrameShape(QFrame.Shape.HLine)
@@ -2370,7 +2504,7 @@ class CV3DMainWindow(QMainWindow):
             plot_header_05a.setStyleSheet("font-weight: 600; margin-top: 2px;")
             v.addWidget(plot_header_05a)
 
-            optics_plot_btn = QPushButton("Optics overview")
+            optics_plot_btn = QPushButton("Optics overview panel")
             optics_plot_btn.setToolTip("05A optical-metric overview (PNG; optional interactive rgl).")
             optics_plot_btn.clicked.connect(lambda _, e=eye: self.plot_05a_outputs(e, "optics"))
             self.r_analysis_plot_buttons[eye]["optics"] = optics_plot_btn
@@ -2493,7 +2627,7 @@ class CV3DMainWindow(QMainWindow):
         self.analysis_ready_export_button.clicked.connect(self.generate_analysis_ready_export)
         outputs_layout.addWidget(self.analysis_ready_export_button)
         self.qc_pdf_report_button = QPushButton("Generate QC PDF report")
-        self.qc_pdf_report_button.clicked.connect(self.generate_qc_pdf_report)
+        self.qc_pdf_report_button.clicked.connect(self.generate_qc_pdf_report_safe)
         outputs_layout.addWidget(self.qc_pdf_report_button)
         self.create_export_zip_button = QPushButton("Create export ZIP")
         self.create_export_zip_button.clicked.connect(self.export_zip)
@@ -3258,6 +3392,20 @@ class CV3DMainWindow(QMainWindow):
                     btn.setToolTip("Run 04 Facet position checking first and make sure the facet-position CSV exists.")
                 else:
                     btn.setToolTip(f"{eye} not present in this dataset.")
+
+            if hasattr(self, "neighbour_qc_plot_buttons") and eye in self.neighbour_qc_plot_buttons:
+                btn = self.neighbour_qc_plot_buttons[eye]
+                files = self.config["eyes"][eye]["files"]
+                path = self.analysis_folder / files.get("neighbours_file", "")
+                state = self.status["workflow_steps"]["04b_neighbour_selection"][eye].get("state")
+                ready = present and state in ["complete", "complete_with_warning"] and path.exists()
+                btn.setEnabled(ready)
+                if ready:
+                    btn.setToolTip("Create and open a 2D QC plot of the retained 04B neighbour graph, neighbour counts, and detected edge facets.")
+                elif present:
+                    btn.setToolTip("Run 04B Neighbour selection first and make sure the stored neighbour CSV exists.")
+                else:
+                    btn.setToolTip(f"{eye} not present in this dataset.")
         if hasattr(self, "head_landmark_status_label"):
             s05 = self.status.get("workflow_steps", {}).get("05_blender_head_landmarking", {})
             self.head_landmark_status_label.setText(
@@ -3297,17 +3445,6 @@ class CV3DMainWindow(QMainWindow):
         parts.append(f"resolved runner = {runner_path}" if runner_path is not None else "resolved runner = missing")
         return "; ".join(parts)
 
-    def r_analysis_disabled_reason_text(self, eye: str, step: str, present: bool, input_problems: List[str], runner_key: str, runner_path: Optional[Path]) -> str:
-        reasons = []
-        if not present:
-            reasons.append(f"{eye} is not marked as present in the project config.")
-        reasons.extend(str(p) for p in (input_problems or []))
-        if runner_key and runner_path is None:
-            reasons.append(f"R runner missing for {STEP_LABELS.get(step, step)}: {self.r_analysis_runner_diagnostic(runner_key, runner_path)}")
-        if not reasons:
-            return ""
-        return "Disabled because:\n" + "\n".join(f"- {r}" for r in reasons)
-
     def refresh_r_analysis_page(self) -> None:
         if not hasattr(self, "r_analysis_summary"):
             return
@@ -3321,10 +3458,6 @@ class CV3DMainWindow(QMainWindow):
                     for step, button in self.r_analysis_buttons.get(eye, {}).items():
                         button.setEnabled(False)
                         button.setToolTip("No dataset loaded.")
-                        reason_label = getattr(self, "r_analysis_button_reason_labels", {}).get(eye, {}).get(step)
-                        if reason_label is not None:
-                            reason_label.setText("Disabled: no dataset loaded.")
-                            reason_label.show()
                     for button in getattr(self, "r_analysis_plot_buttons", {}).get(eye, {}).values():
                         button.setEnabled(False)
                         button.setToolTip("No dataset loaded.")
@@ -3390,17 +3523,6 @@ class CV3DMainWindow(QMainWindow):
                     enabled = present and not input_problems and runner_path is not None
                     btn.setEnabled(enabled)
                     btn.setToolTip("\n".join(tooltip_lines))
-                    reason_label = getattr(self, "r_analysis_button_reason_labels", {}).get(eye, {}).get(step)
-                    if reason_label is not None:
-                        if enabled:
-                            reason_label.clear()
-                            reason_label.hide()
-                        else:
-                            reason_text = self.r_analysis_disabled_reason_text(eye, step, present, input_problems, runner_key, runner_path)
-                            if not reason_text:
-                                reason_text = "Disabled because the required state could not be verified."
-                            reason_label.setText(reason_text)
-                            reason_label.show()
 
             qc_runner = self.resolve_r_analysis_runner("r_step05a_qc_plot_script_path")
             qc05b_runner = self.resolve_r_analysis_runner("r_step05b_qc_plot_script_path")
@@ -5330,7 +5452,7 @@ class CV3DMainWindow(QMainWindow):
                 self,
                 "Open interactive rgl window?",
                 "Create the PNG preview only, or also keep an interactive rgl window open for inspection?\n\n"
-                "If you choose Yes, the GUI will wait until you close the rgl window.",
+                "If you choose Yes, the rgl window will stay open independently; the CV3D UI remains usable.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.No
             )
@@ -5383,7 +5505,7 @@ class CV3DMainWindow(QMainWindow):
                 f"Thresholded table: {thresholded_rel}\n"
                 f"Output PNG: {plot_rel}\n"
                 f"Open interactive rgl window: {open_rgl_window}\n\n"
-                "The GUI will wait until Rscript finishes.",
+                "The PNG will open automatically when it is created.",
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
             )
             if reply != QMessageBox.StandardButton.Ok:
@@ -5402,23 +5524,12 @@ class CV3DMainWindow(QMainWindow):
             f"Working directory:\n{self.analysis_folder}\n"
         )
 
-        if automatic:
-            try:
-                out = stdout_path.open("w", encoding="utf-8", errors="replace")
-                err = stderr_path.open("w", encoding="utf-8", errors="replace")
-                try:
-                    process = self.start_background_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
-                finally:
-                    out.close()
-                    err.close()
-                if not hasattr(self, "_background_plot_processes"):
-                    self._background_plot_processes = []
-                self._background_plot_processes = [p for p in self._background_plot_processes if p.poll() is None]
-                self._background_plot_processes.append(process)
-                with launch_diag_path.open("a", encoding="utf-8") as f:
-                    f.write(f"\nBackground process ID:\n{process.pid}\n")
-            except Exception as e:
-                QMessageBox.warning(self, "R thresholded 3D plot launch failed", str(e))
+        plot_path = resolve_task_path(task, "output_plot_png_abs", self.analysis_folder)
+        if open_rgl_window:
+            self.launch_background_plot_job(
+                cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
+                launch_path=launch_diag_path, png_paths=[plot_path], description="Thresholded local-height plot",
+            )
             return
 
         try:
@@ -5448,9 +5559,7 @@ class CV3DMainWindow(QMainWindow):
         self.refresh_all()
 
         if exit_code == 0 and runner_status == "success" and plot_path.exists():
-            # Success is intentionally silent here. The generated PNG path is recorded
-            # in the task/status JSON and visible in the console/log panel.
-            self.refresh_all()
+            self.open_local_path(plot_path, "thresholded local-height plot")
         else:
             details = [
                 f"Rscript exit code: {exit_code}",
@@ -5608,7 +5717,7 @@ class CV3DMainWindow(QMainWindow):
             f"Neighbourhood radius: {task.get('local_height_neighbourhood_radius')}\n"
             f"Max cores: {task.get('max_cores')}\n"
             f"R package: CV3D from {self.settings.get('r_github_repo', 'Pete-s-Lab/CV3D')}\n\n"
-            "The GUI will wait until Rscript finishes.",
+            "The PNG will open automatically when it is created.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -6644,7 +6753,7 @@ class CV3DMainWindow(QMainWindow):
             self,
             "Open interactive rgl window?",
             "Create the PNG preview only, or also keep an interactive rgl window open for inspection?\n\n"
-            "If you choose Yes, the GUI will wait until you close the rgl window.",
+            "If you choose Yes, the rgl window will stay open independently; the CV3D UI remains usable.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.No
         )
@@ -6690,7 +6799,7 @@ class CV3DMainWindow(QMainWindow):
             f"Input CSV: {input_rel}\n"
             f"Output PNG: {plot_rel}\n"
             f"Open interactive rgl window: {open_rgl_window}\n\n"
-            "The GUI will wait until Rscript finishes.",
+            "The PNG will open automatically when it is created.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -6708,6 +6817,14 @@ class CV3DMainWindow(QMainWindow):
             "Command:\n" + " ".join(f'"{part}"' for part in cmd) + "\n\n"
             f"Working directory:\n{self.analysis_folder}\n"
         )
+
+        plot_path = self.analysis_folder / plot_rel
+        if open_rgl_window:
+            self.launch_background_plot_job(
+                cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
+                launch_path=launch_diag_path, png_paths=[plot_path], description="Raw local-height plot",
+            )
+            return
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
@@ -6736,9 +6853,7 @@ class CV3DMainWindow(QMainWindow):
         self.refresh_all()
 
         if exit_code == 0 and runner_status == "success" and plot_path.exists():
-            # Success is intentionally silent here. The generated PNG path is recorded
-            # in the task/status JSON and visible in the console/log panel.
-            self.refresh_all()
+            self.open_local_path(plot_path, "raw local-height plot")
         else:
             details = [
                 f"Rscript exit code: {exit_code}",
@@ -6807,7 +6922,7 @@ class CV3DMainWindow(QMainWindow):
             self,
             "Open interactive rgl window?",
             "Create the PNG preview only, or also keep an interactive rgl window open for inspection?\n\n"
-            "If you choose Yes, the GUI will wait until you close the rgl window.",
+            "If you choose Yes, the rgl window will stay open independently; the CV3D UI remains usable.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.No
         )
@@ -6853,7 +6968,7 @@ class CV3DMainWindow(QMainWindow):
             f"Input CSV: {input_rel}\n"
             f"Output PNG: {plot_rel}\n"
             f"Open interactive rgl window: {open_rgl_window}\n\n"
-            "The GUI will wait until Rscript finishes.",
+            "The PNG will open automatically when it is created.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -6871,6 +6986,14 @@ class CV3DMainWindow(QMainWindow):
             "Command:\n" + " ".join(f'"{part}"' for part in cmd) + "\n\n"
             f"Working directory:\n{self.analysis_folder}\n"
         )
+
+        plot_path = self.analysis_folder / plot_rel
+        if open_rgl_window:
+            self.launch_background_plot_job(
+                cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
+                launch_path=launch_diag_path, png_paths=[plot_path], description="Normalized local-height plot",
+            )
+            return
 
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
@@ -6899,9 +7022,7 @@ class CV3DMainWindow(QMainWindow):
         self.refresh_all()
 
         if exit_code == 0 and runner_status == "success" and plot_path.exists():
-            # Success is intentionally silent here. The generated PNG path is recorded
-            # in the task/status JSON and visible in the console/log panel.
-            self.refresh_all()
+            self.open_local_path(plot_path, "normalized local-height plot")
         else:
             details = [
                 f"Rscript exit code: {exit_code}",
@@ -7057,7 +7178,7 @@ class CV3DMainWindow(QMainWindow):
                 self,
                 "Open interactive rgl window?",
                 "Create the PNG overlay only, or also keep an interactive rgl 3D window open for inspection?\n\n"
-                "The PNG is saved in the background either way. If you choose Yes, the GUI will wait until you close the rgl window.",
+                "The PNG is saved in the background either way. If you choose Yes, the rgl window will stay open independently; the CV3D UI remains usable.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.No
             )
@@ -7114,23 +7235,11 @@ class CV3DMainWindow(QMainWindow):
             f"Working directory:\n{self.analysis_folder}\n"
         )
 
-        if automatic:
-            try:
-                out = stdout_path.open("w", encoding="utf-8", errors="replace")
-                err = stderr_path.open("w", encoding="utf-8", errors="replace")
-                try:
-                    process = self.start_background_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
-                finally:
-                    out.close()
-                    err.close()
-                if not hasattr(self, "_background_plot_processes"):
-                    self._background_plot_processes = []
-                self._background_plot_processes = [p for p in self._background_plot_processes if p.poll() is None]
-                self._background_plot_processes.append(process)
-                with launch_diag_path.open("a", encoding="utf-8") as f:
-                    f.write(f"\nBackground process ID:\n{process.pid}\n")
-            except Exception as e:
-                QMessageBox.warning(self, "Facet point plot launch failed", str(e))
+        if open_rgl_window:
+            self.launch_background_plot_job(
+                cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
+                launch_path=launch_diag_path, png_paths=[plot_path], description=f"{label.capitalize()} overlay plot",
+            )
             return
 
         try:
@@ -7159,7 +7268,9 @@ class CV3DMainWindow(QMainWindow):
 
         self.refresh_all()
 
-        if not (exit_code == 0 and runner_status == "success" and plot_path.exists()):
+        if exit_code == 0 and runner_status == "success" and plot_path.exists():
+            self.open_local_path(plot_path, f"{label} overlay plot")
+        else:
             details = [
                 f"Rscript exit code: {exit_code}",
                 f"Runner status: {runner_status}",
@@ -7184,7 +7295,6 @@ class CV3DMainWindow(QMainWindow):
             "eye_parameter": "Eye parameter",
             "sampling_frequency_rad": "Sampling frequency (rad^-1)",
             "acuity_cpd": "Acuity (cycles/degree)",
-            "number_of_neighbours": "Number of neighbours",
         }
         excluded = {
             "cv_id", "eye", "facet_id", "internal_ID", "CV", "ID", "type", "neighbours",
@@ -7193,7 +7303,10 @@ class CV3DMainWindow(QMainWindow):
             # but are not useful as generic per-facet biological metric plots.
             "normal_envelope_factor", "normal_support_scale_um",
             "normal_weight_cutoff_um", "normal_support_face_count", "n_neighbors_used", "n_neighbours_used",
-            "facet_size"
+            "facet_size",
+            # 04B neighbour-selection/QC fields belong on Eye Workflow, not in the generic facet-value selector.
+            "number_of_neighbours", "is_edge_facet", "edge_angular_gap_deg",
+            "edge_gap_threshold_deg", "neighbour_core_spacing_um", "shadow_links_removed"
         }
         rows: List[Dict[str, str]] = []
         fieldnames: List[str] = []
@@ -7224,15 +7337,24 @@ class CV3DMainWindow(QMainWindow):
                     continue
             return False
 
+        def is_neighbour_qc_field(col: str) -> bool:
+            low = col.lower()
+            return (
+                "neighbour" in low or "neighbor" in low
+                or low.startswith("edge_")
+                or low.startswith("shadow_")
+                or low == "is_edge_facet"
+            )
+
         preferred_order = [
-            "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd", "sampling_frequency_rad", "interfacet_angle_rad", "number_of_neighbours"
+            "facet_size_smoothed", "interfacet_angle_deg", "eye_parameter", "acuity_cpd", "sampling_frequency_rad", "interfacet_angle_rad"
         ]
         ordered: List[str] = []
         for col in preferred_order:
-            if col in fieldnames and col not in excluded and looks_numeric(col):
+            if col in fieldnames and col not in excluded and not is_neighbour_qc_field(col) and looks_numeric(col):
                 ordered.append(col)
         for col in fieldnames:
-            if col in excluded or col in ordered:
+            if col in excluded or col in ordered or is_neighbour_qc_field(col):
                 continue
             if looks_numeric(col):
                 ordered.append(col)
@@ -7429,6 +7551,14 @@ class CV3DMainWindow(QMainWindow):
         cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
         write_text(launch_path, "Command:\n" + " ".join(f'\"{part}\"' for part in cmd) + "\n\n" + f"Working directory:\n{self.analysis_folder}\n")
 
+        plot_path = self.analysis_folder / output_png_rel
+        if open_rgl_window:
+            self.launch_background_plot_job(
+                cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
+                launch_path=launch_path, png_paths=[plot_path], description=label,
+            )
+            return
+
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
                 result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
@@ -7455,7 +7585,9 @@ class CV3DMainWindow(QMainWindow):
 
         self.refresh_all()
 
-        if not (exit_code == 0 and runner_status == "success" and plot_path.exists()):
+        if exit_code == 0 and runner_status == "success" and plot_path.exists():
+            self.open_local_path(plot_path, label)
+        else:
             details = [
                 f"Rscript exit code: {exit_code}",
                 f"Runner status: {runner_status}",
@@ -7622,6 +7754,15 @@ class CV3DMainWindow(QMainWindow):
         cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
         write_text(launch_path, "Command:\n" + " ".join(f'\"{part}\"' for part in cmd) + "\n\n" + f"Working directory:\n{self.analysis_folder}\n")
 
+        plot_path = self.analysis_folder / output_png_rel
+        reference_plot_path = self.analysis_folder / output_reference_png_rel
+        if open_rgl_window:
+            self.launch_background_plot_job(
+                cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
+                launch_path=launch_path, png_paths=[plot_path, reference_plot_path], description=label,
+            )
+            return
+
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
                 result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
@@ -7648,7 +7789,11 @@ class CV3DMainWindow(QMainWindow):
 
         self.refresh_all()
 
-        if not (exit_code == 0 and runner_status == "success" and plot_path.exists()):
+        if exit_code == 0 and runner_status == "success" and plot_path.exists():
+            self.open_local_path(plot_path, label)
+            if reference_plot_path.exists():
+                self.open_local_path(reference_plot_path, "05B landmark-reference QC plot")
+        else:
             details = [
                 f"Rscript exit code: {exit_code}",
                 f"Runner status: {runner_status}",
@@ -7779,6 +7924,14 @@ class CV3DMainWindow(QMainWindow):
         cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
         write_text(launch_path, "Command:\n" + " ".join(f'\"{part}\"' for part in cmd) + "\n\n" + f"Working directory:\n{self.analysis_folder}\n")
 
+        primary_plot_path = Path(output_pngs["view_angles"])
+        if open_rgl_window:
+            self.launch_background_plot_job(
+                cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
+                launch_path=launch_path, png_paths=[primary_plot_path], description=label,
+            )
+            return
+
         try:
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out, stderr_path.open("w", encoding="utf-8", errors="replace") as err:
                 result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
@@ -7791,7 +7944,6 @@ class CV3DMainWindow(QMainWindow):
             return
 
         status_path = self.analysis_folder / status_rel
-        primary_plot_path = Path(output_pngs["view_angles"])
         rgl_snapshot_path = Path(output_pngs["rgl_3d"])
         runner_status = "unknown"
         status_message = ""
@@ -7806,7 +7958,9 @@ class CV3DMainWindow(QMainWindow):
 
         self.refresh_all()
 
-        if not (exit_code == 0 and runner_status == "success" and primary_plot_path.exists()):
+        if exit_code == 0 and runner_status == "success" and primary_plot_path.exists():
+            self.open_local_path(primary_plot_path, label)
+        else:
             details = [
                 f"Rscript exit code: {exit_code}",
                 f"Runner status: {runner_status}",
@@ -8051,7 +8205,7 @@ class CV3DMainWindow(QMainWindow):
             f"Weight exponent: {params['weight_exponent']}\n"
             f"Iterations: {params['max_iterations']}\n"
             f"Cores: {params['cores']}\n\n"
-            "The GUI will wait until Rscript finishes. After successful condensation, the facet-candidate inspection plot will open automatically.",
+            "The PNG will open automatically when it is created. After successful condensation, the facet-candidate inspection plot will open automatically.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -8662,16 +8816,22 @@ class CV3DMainWindow(QMainWindow):
     def create_r_step04b_task(self, eye: str, mode: str, edge_gap_threshold_deg: Optional[float] = None) -> Path:
         cv_id = self.config["dataset_identity"]["cv_id"]
         files = self.config["eyes"][eye]["files"]
-        self.make_blender_facet_names_authoritative(eye)
         mode = str(mode).strip().lower()
-        if mode not in {"preview", "final"}:
-            raise ValueError("04B mode must be 'preview' or 'final'.")
+        if mode not in {"preview", "final", "qc"}:
+            raise ValueError("04B mode must be 'preview', 'final', or 'qc'.")
+        if mode in {"preview", "final"}:
+            self.make_blender_facet_names_authoritative(eye)
 
         if mode == "preview":
             task_rel = files["r_step04b_preview_task_file"]
             status_rel = files["r_step04b_preview_status_file"]
             stdout_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_preview_R_stdout.log")
             stderr_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_preview_R_stderr.log")
+        elif mode == "qc":
+            task_rel = eye_json_rel_path(eye, f"04B_{cv_id}_{eye}_QC_R_task.json")
+            status_rel = eye_json_rel_path(eye, f"04B_{cv_id}_{eye}_QC_R_status.json")
+            stdout_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_QC_R_stdout.log")
+            stderr_rel = eye_log_rel_path(eye, f"04B_{cv_id}_{eye}_QC_R_stderr.log")
         else:
             task_rel = files["r_step04b_task_file"]
             status_rel = files["r_step04b_status_file"]
@@ -8701,6 +8861,14 @@ class CV3DMainWindow(QMainWindow):
                 "output_edge_gap_table_abs": str(self.analysis_folder / files["edge_gap_table_file"]),
                 "output_comparison_png": files["edge_threshold_comparison_plot_file"],
                 "output_comparison_png_abs": str(self.analysis_folder / files["edge_threshold_comparison_plot_file"]),
+            })
+        elif mode == "qc":
+            qc_rel = files.get("neighbours_qc_plot_file") or eye_inspection_rel_path(eye, f"04B_{cv_id}_{eye}_neighbours_QC.png")
+            task.update({
+                "input_neighbours": files["neighbours_file"],
+                "input_neighbours_abs": str(self.analysis_folder / files["neighbours_file"]),
+                "output_qc_png": qc_rel,
+                "output_qc_png_abs": str(self.analysis_folder / qc_rel),
             })
         else:
             if edge_gap_threshold_deg is None:
@@ -8778,6 +8946,31 @@ class CV3DMainWindow(QMainWindow):
                 f"{status_message}\n\nstdout: {task.get('stdout_file', '')}\nstderr: {task.get('stderr_file', '')}"
             )
         return ok, status_message
+
+    def plot_neighbours_qc(self, eye: str) -> None:
+        if not self.ensure_eye_and_dataset(eye):
+            return
+        files = self.config["eyes"][eye]["files"]
+        neighbours_rel = files.get("neighbours_file", "")
+        neighbours_path = self.analysis_folder / str(neighbours_rel)
+        if not neighbours_rel or not neighbours_path.exists():
+            QMessageBox.warning(self, "04B neighbours missing", "Run 04B Neighbour selection first and make sure the stored neighbour CSV exists.")
+            self.refresh_all()
+            return
+        try:
+            task_path = self.create_r_step04b_task(eye, "qc")
+        except Exception as e:
+            QMessageBox.warning(self, "Cannot create 04B QC task", str(e))
+            return
+        ok, _ = self.run_r_step04b_task(task_path)
+        if not ok:
+            return
+        qc_rel = files.get("neighbours_qc_plot_file") or eye_inspection_rel_path(eye, f"04B_{self.config['dataset_identity']['cv_id']}_{eye}_neighbours_QC.png")
+        qc_path = self.analysis_folder / qc_rel
+        if not qc_path.exists():
+            QMessageBox.warning(self, "04B QC plot missing", f"Expected neighbour QC PNG was not created:\n\n{qc_path}")
+            return
+        self.open_local_path(qc_path, "04B neighbours QC plot")
 
     def launch_r_04b_neighbours(self, eye: str) -> None:
         if not self.ensure_step_ready("04b_neighbour_selection", eye):
@@ -9814,6 +10007,105 @@ class CV3DMainWindow(QMainWindow):
         self.refresh_all()
         QMessageBox.information(self, "Analysis-ready export complete", f"Created {len(result['created_files'])} export files.\n\nFacet rows: {len(result['facet_rows'])}")
 
+    def create_report_05a_facet_value_plots(self, export_folder: Path) -> tuple[Dict[str, List[tuple[str, Path]]], List[str]]:
+        """Create all scalar 05A Choose-facet-value maps for the QC report.
+
+        The existing 05A QC R helper is used deliberately so report maps and
+        interactive R Analysis maps share exactly the same CV3D::view_eye_face_on()
+        orientation, colour mapping, and facet-size-based point scaling.  One R
+        process is started per eye and all available scalar facet-value maps are
+        generated in that process to avoid repeated R startup overhead.
+        """
+        plots: Dict[str, List[tuple[str, Path]]] = {}
+        messages: List[str] = []
+        if not self.config or not self.analysis_folder:
+            return plots, messages
+
+        rscript = configured_file_path(self.settings.get("rscript_executable", ""))
+        runner = self.resolve_r_analysis_runner("r_step05a_qc_plot_script_path")
+        if rscript is None or runner is None:
+            messages.append("05A facet-value report maps skipped because Rscript or the 05A QC runner is not configured.")
+            return plots, messages
+
+        cv_id = self.config["dataset_identity"]["cv_id"]
+        for eye in self.active_export_eyes():
+            files = self.config.get("eyes", {}).get(eye, {}).get("files", {})
+            optic_rel = files.get("optic_parameters_file")
+            normals_rel = files.get("facet_normals_file")
+            if not optic_rel:
+                continue
+            optic_path = self.analysis_folder / str(optic_rel)
+            normals_path = self.analysis_folder / str(normals_rel) if normals_rel else None
+            if not optic_path.exists():
+                continue
+
+            choices = self.get_05a_metric_plot_choices(optic_path)
+            if not choices:
+                continue
+
+            scalar_output_paths: List[Path] = []
+            for col, _label in choices:
+                token = safe_filename_token(col)
+                scalar_output_paths.append(export_folder / f"06_{cv_id}_{eye}_05A_facet_value_{token}_face_on.png")
+            normals_output_path = None
+            if normals_path is not None and normals_path.exists():
+                normals_output_path = export_folder / f"06_{cv_id}_{eye}_05A_facet_value_normals_face_on.png"
+            output_paths = list(scalar_output_paths) + ([normals_output_path] if normals_output_path is not None else [])
+
+            task_prefix = "06FV"
+            task_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_task.json")
+            status_rel = eye_json_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_status.json")
+            stdout_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_stdout.log")
+            stderr_rel = eye_log_rel_path(eye, f"{task_prefix}_{cv_id}_{eye}_R_stderr.log")
+            task = {
+                "task_type": "05A_qc_plot",
+                "task_prefix": task_prefix,
+                "plot_kind": "facet_value_report",
+                "cv_id": cv_id,
+                "eye": eye,
+                "analysis_folder": str(self.analysis_folder),
+                "input_optic_parameters": str(optic_rel),
+                "input_optic_parameters_abs": str(optic_path),
+                "input_facet_normals": str(normals_rel or ""),
+                "input_facet_normals_abs": str(self.analysis_folder / str(normals_rel)) if normals_rel else "",
+                "selected_metric_cols": [col for col, _ in choices],
+                "selected_metric_labels": [label for _, label in choices],
+                "output_plot_pngs": [p.name for p in scalar_output_paths],
+                "output_plot_pngs_abs": [str(p) for p in scalar_output_paths],
+                "report_normals_output_png_abs": str(normals_output_path) if normals_output_path is not None else "",
+                "output_plot_png": str(scalar_output_paths[0]) if scalar_output_paths else (str(normals_output_path) if normals_output_path is not None else ""),
+                "output_plot_png_abs": str(scalar_output_paths[0]) if scalar_output_paths else (str(normals_output_path) if normals_output_path is not None else ""),
+                "open_rgl_window": False,
+                "show_facet_labels": False,
+                "status_file": status_rel,
+                "status_file_abs": str(self.analysis_folder / status_rel),
+                "stdout_file": stdout_rel,
+                "stdout_file_abs": str(self.analysis_folder / stdout_rel),
+                "stderr_file": stderr_rel,
+                "stderr_file_abs": str(self.analysis_folder / stderr_rel),
+                "notes": "Created by CV3D Results/Export for the per-eye face-on facet-value QC page.",
+            }
+            task_path = self.analysis_folder / task_rel
+            write_json(task_path, task)
+            (self.analysis_folder / stdout_rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.analysis_folder / stderr_rel).parent.mkdir(parents=True, exist_ok=True)
+            cmd = [str(rscript), str(runner), relative_task_argument(task_path, self.analysis_folder)]
+            try:
+                with (self.analysis_folder / stdout_rel).open("w", encoding="utf-8", errors="replace") as out, (self.analysis_folder / stderr_rel).open("w", encoding="utf-8", errors="replace") as err:
+                    result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder), stdout=out, stderr=err)
+                existing = [(label, path) for (_col, label), path in zip(choices, scalar_output_paths) if path.exists()]
+                if normals_output_path is not None and normals_output_path.exists():
+                    existing.append(("Normals", normals_output_path))
+                if result.returncode == 0 and existing:
+                    plots[eye] = existing
+                    messages.append(f"Created {len(existing)} face-on 05A Choose-facet-value report maps for {eye}.")
+                else:
+                    messages.append(f"05A facet-value report maps failed for {eye}. See {stderr_rel}.")
+            except Exception as e:
+                messages.append(f"05A facet-value report maps failed for {eye}: {e}")
+
+        return plots, messages
+
     def create_report_05c_rgl_snapshots(self, export_folder: Path) -> List[str]:
         messages: List[str] = []
         if not self.config or not self.analysis_folder:
@@ -9919,6 +10211,17 @@ class CV3DMainWindow(QMainWindow):
                 messages.append(f"Fresh 05C rgl snapshot failed for {scope}: {e}")
         return messages
 
+    def generate_qc_pdf_report_safe(self) -> None:
+        """Generate the QC PDF and surface unexpected errors in the GUI."""
+        try:
+            self.generate_qc_pdf_report()
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "QC PDF report failed",
+                "The QC PDF report could not be generated.\n\n" + str(e),
+            )
+
     def generate_qc_pdf_report(self) -> None:
         if not self.config or not self.analysis_folder:
             return
@@ -9936,8 +10239,10 @@ class CV3DMainWindow(QMainWindow):
         facet_rows = self.collect_analysis_ready_rows()
         summary_rows = self.build_eye_summary_rows(facet_rows)
         freshness_messages = []
+        facet_value_report_plots, facet_value_messages = self.create_report_05a_facet_value_plots(export_folder)
+        freshness_messages.extend(facet_value_messages)
         if getattr(self, "report_create_fresh_rgl_snapshots", None) is not None and self.report_create_fresh_rgl_snapshots.isChecked():
-            freshness_messages = self.create_report_05c_rgl_snapshots(export_folder)
+            freshness_messages.extend(self.create_report_05c_rgl_snapshots(export_folder))
 
         def to_float(row, key):
             try:
@@ -10484,6 +10789,46 @@ class CV3DMainWindow(QMainWindow):
                 w, h = fit_w, fit_h
             return f"__CV3D_IMAGE__|{str(path).replace('|', '_')}|{x:.2f}|{y:.2f}|{w:.2f}|{h:.2f}"
 
+        def facet_value_report_pages():
+            pages = []
+            for eye in self.active_export_eyes():
+                items = facet_value_report_plots.get(eye, [])
+                if not items:
+                    continue
+                cmds = new_page(
+                    f"05A face-on facet-value QC: {eye}",
+                    "All available Choose facet value plots; canonical CV3D face-on orientation",
+                )
+                # Up to six plots use a 2 x 3 grid. With Normals included, or
+                # if future outputs add more choices, keep every plot on this
+                # eye's single page using a compact three-column layout.
+                n = len(items)
+                if n <= 6:
+                    positions = [
+                        (42, 525, 245, 205), (308, 525, 245, 205),
+                        (42, 290, 245, 205), (308, 290, 245, 205),
+                        (42, 55, 245, 205), (308, 55, 245, 205),
+                    ]
+                else:
+                    positions = []
+                    cols = 3
+                    rows = (n + cols - 1) // cols
+                    avail_h = 675.0
+                    gap_x, gap_y = 10.0, 8.0
+                    cell_w = (511.0 - gap_x * (cols - 1)) / cols
+                    cell_h = (avail_h - gap_y * (rows - 1)) / max(rows, 1)
+                    for idx in range(n):
+                        row = idx // cols
+                        col = idx % cols
+                        x = 42 + col * (cell_w + gap_x)
+                        y = 55 + (rows - 1 - row) * (cell_h + gap_y)
+                        positions.append((x, y, cell_w, cell_h))
+                for (label, path), (x, y, w, h) in zip(items, positions):
+                    if path.exists():
+                        cmds.append(image_cmd(path, x, y, w, h))
+                pages.append(cmds)
+            return pages
+
         def rgl_snapshot_pages():
             pages = []
             scopes = []
@@ -10629,6 +10974,8 @@ class CV3DMainWindow(QMainWindow):
             pages.append(optic_barplots_page())
             pages.append(optic_histograms_page())
 
+        pages.extend(facet_value_report_pages())
+
         if getattr(self, 'report_include_05b_qc', None) is None or self.report_include_05b_qc.isChecked():
             pages.extend(pointcloud_report_pages())
 
@@ -10668,13 +11015,14 @@ class CV3DMainWindow(QMainWindow):
         rep['pdf_export'].update({'state': 'exported', 'symbol': '✓', 'last_exported': timestamp, 'outdated_export': False, 'messages': freshness_messages[:]})
         self.save_current_files()
         self.refresh_all()
+        self.open_local_path(pdf_path, "QC PDF report")
         QMessageBox.information(self, 'QC PDF report complete', f'Created analysis-ready export and QC PDF report:\n\n{out["qc_pdf_report"]["file"]}\n\nFolder:\n{export_folder}')
 
     def generate_html_report(self) -> None:
-        self.generate_qc_pdf_report()
+        self.generate_qc_pdf_report_safe()
 
     def export_pdf(self) -> None:
-        self.generate_qc_pdf_report()
+        self.generate_qc_pdf_report_safe()
 
     def export_zip(self) -> None:
         if not self.config or not self.analysis_folder:
