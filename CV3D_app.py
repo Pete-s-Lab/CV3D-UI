@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import subprocess
+import time
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -34,9 +35,12 @@ except ImportError as e:
     ) from e
 
 
-APP_VERSION = "0.1.124"
+APP_VERSION = "0.1.127"
 
 CHANGELOG = [
+    "0.1.127: Shortened Eye Workflow action labels and added run-level process start/end timestamps, duration, and exit code to task/status JSON metadata.",
+    "0.1.126: When an optional rgl QC view is requested, keep the generated PNG saved but do not open it automatically; when rgl is not requested, open the PNG as before.",
+    "0.1.125: Updated the bundled tutorial for the dedicated 04B edge-aware neighbour workflow, canonical face-on QC plots, automatic PNG/PDF opening, non-blocking rgl inspection, and current report contents.",
     "0.1.124: Fixed QC PDF facet-value report generation, auto-opens plot PNGs, and keeps rgl inspection processes in the background so the UI remains responsive.",
     "0.1.123: Standardised 05A/04B face-on QC views via view_eye_face_on, moved disabled-button reasons to tooltips, added all face-on facet-value maps to the QC PDF, kept neighbour-QC variables out of Choose facet value, and renamed Optics overview panel.",
     "0.1.122: Matched Choose facet value plots to the established Eye Workflow projection/camera orientation, retained the original normal-direction colours, and added a 04B Neighbours QC plot button on Eye Workflow.",
@@ -2041,11 +2045,165 @@ class CV3DMainWindow(QMainWindow):
                 out["creationflags"] = int(out.get("creationflags", 0)) | create_no_window
         return out
 
-    def run_blocking_process(self, *args, **kwargs):
-        """Run an external process while making the UI's blocking state explicit."""
-        self.set_waiting_for_process(True)
+    @staticmethod
+    def process_timestamp() -> str:
+        """Return a local ISO-8601 timestamp with UTC offset for runtime metadata."""
+        return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+    @staticmethod
+    def _file_signature(path: Path):
         try:
-            return subprocess.run(*args, **self.no_console_process_kwargs(kwargs))
+            stat = path.stat()
+            return (stat.st_mtime_ns, stat.st_size)
+        except Exception:
+            return None
+
+    def _task_json_from_command(self, cmd, cwd: Optional[Path] = None) -> Optional[Path]:
+        """Find the existing CV3D task JSON passed to an external helper command."""
+        if not isinstance(cmd, (list, tuple)):
+            return None
+        base = Path(cwd) if cwd else None
+        for part in reversed(cmd):
+            try:
+                text = str(part)
+            except Exception:
+                continue
+            if not text.lower().endswith(".json"):
+                continue
+            candidate = Path(text)
+            if not candidate.is_absolute() and base is not None:
+                candidate = base / candidate
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return None
+
+    def _begin_process_timing(
+        self,
+        cmd,
+        *,
+        cwd: Optional[Path] = None,
+        extra_json_paths: Optional[List[Path]] = None,
+        timing_scope: str = "external_process",
+    ) -> Dict[str, Any]:
+        """Prepare runtime metadata and stamp a task JSON before process launch."""
+        started_at = self.process_timestamp()
+        timing: Dict[str, Any] = {
+            "started_at": started_at,
+            "perf_started": time.perf_counter(),
+            "task_path": None,
+            "status_paths": [],
+            "timing_scope": timing_scope,
+        }
+
+        task_path = self._task_json_from_command(cmd, cwd)
+        if task_path is not None:
+            timing["task_path"] = task_path
+            try:
+                task = read_json(task_path)
+                task["process_started_at"] = started_at
+                task["process_finished_at"] = None
+                task["process_runtime_seconds"] = None
+                task["process_exit_code"] = None
+                task["process_timing_scope"] = timing_scope
+                write_json(task_path, task)
+
+                stored_status = task.get("status_file_abs") or task.get("status_file")
+                if stored_status:
+                    status_path = Path(str(stored_status))
+                    if not status_path.is_absolute():
+                        if cwd is not None:
+                            status_path = Path(cwd) / status_path
+                        else:
+                            analysis_stored = task.get("analysis_folder")
+                            if analysis_stored:
+                                analysis_base = Path(str(analysis_stored))
+                                if not analysis_base.is_absolute():
+                                    analysis_base = task_path.parent / analysis_base
+                                status_path = analysis_base / status_path
+                            else:
+                                status_path = task_path.parent / status_path
+                    timing["status_paths"].append((status_path, self._file_signature(status_path)))
+            except Exception:
+                # Timing metadata must never prevent a workflow task from running.
+                pass
+
+        for path in extra_json_paths or []:
+            p = Path(path)
+            key = str(p)
+            if not any(str(existing) == key for existing, _ in timing["status_paths"]):
+                timing["status_paths"].append((p, self._file_signature(p)))
+
+        return timing
+
+    def _finish_process_timing(
+        self,
+        timing: Optional[Dict[str, Any]],
+        *,
+        exit_code: Optional[int],
+        launch_error: Optional[str] = None,
+    ) -> None:
+        """Write final runtime metadata to the task and freshly written status JSON."""
+        if not timing:
+            return
+        finished_at = self.process_timestamp()
+        runtime_seconds = max(0.0, time.perf_counter() - float(timing.get("perf_started", time.perf_counter())))
+        fields: Dict[str, Any] = {
+            "process_started_at": timing.get("started_at"),
+            "process_finished_at": finished_at,
+            "process_runtime_seconds": round(runtime_seconds, 3),
+            "process_exit_code": exit_code,
+            "process_timing_scope": timing.get("timing_scope", "external_process"),
+        }
+        if launch_error:
+            fields["process_launch_error"] = str(launch_error)
+
+        task_path = timing.get("task_path")
+        if task_path:
+            try:
+                task = read_json(Path(task_path))
+                task.update(fields)
+                write_json(Path(task_path), task)
+            except Exception:
+                pass
+
+        for status_path, old_signature in timing.get("status_paths", []):
+            path = Path(status_path)
+            new_signature = self._file_signature(path)
+            # Do not attach a new run to a stale status file that the process did not rewrite.
+            if new_signature is None or new_signature == old_signature:
+                continue
+            try:
+                payload = read_json(path)
+                if isinstance(payload, dict):
+                    payload.update(fields)
+                    write_json(path, payload)
+            except Exception:
+                pass
+
+    def run_blocking_process(
+        self,
+        *args,
+        timing_json_paths: Optional[List[Path]] = None,
+        timing_scope: str = "external_process",
+        **kwargs,
+    ):
+        """Run an external process and persist run timing when task/status JSON is available."""
+        self.set_waiting_for_process(True)
+        cmd = args[0] if args else kwargs.get("args")
+        cwd = kwargs.get("cwd")
+        timing = self._begin_process_timing(
+            cmd,
+            cwd=Path(cwd) if cwd else None,
+            extra_json_paths=timing_json_paths,
+            timing_scope=timing_scope,
+        )
+        try:
+            result = subprocess.run(*args, **self.no_console_process_kwargs(kwargs))
+            self._finish_process_timing(timing, exit_code=result.returncode)
+            return result
+        except Exception as e:
+            self._finish_process_timing(timing, exit_code=None, launch_error=str(e))
+            raise
         finally:
             self.set_waiting_for_process(False)
 
@@ -2063,6 +2221,7 @@ class CV3DMainWindow(QMainWindow):
         launch_path: Path,
         png_paths: List[Path],
         description: str,
+        open_pngs: bool = True,
     ) -> bool:
         """Run an rgl-capable plot helper without blocking the Qt event loop.
 
@@ -2070,7 +2229,8 @@ class CV3DMainWindow(QMainWindow):
         open.  The UI therefore polls the child process instead of waiting for
         it synchronously.  Newly written PNGs are opened as soon as they appear,
         while the rgl process can continue independently until its window is
-        closed by the user.
+        closed by the user. PNG files can still be monitored for completion without
+        being opened when an rgl view is the requested inspection window.
         """
         stdout_path = Path(stdout_path)
         stderr_path = Path(stderr_path)
@@ -2089,11 +2249,17 @@ class CV3DMainWindow(QMainWindow):
 
         out = None
         err = None
+        timing = self._begin_process_timing(
+            cmd,
+            cwd=Path(cwd),
+            timing_scope="external_process_with_optional_interactive_window",
+        )
         try:
             out = stdout_path.open("w", encoding="utf-8", errors="replace")
             err = stderr_path.open("w", encoding="utf-8", errors="replace")
             process = self.start_background_process(cmd, cwd=str(cwd), stdout=out, stderr=err)
         except Exception as e:
+            self._finish_process_timing(timing, exit_code=None, launch_error=str(e))
             if out is not None:
                 out.close()
             if err is not None:
@@ -2130,7 +2296,9 @@ class CV3DMainWindow(QMainWindow):
                 except Exception:
                     continue
                 if old_signatures.get(key) != sig:
-                    if self.open_local_path(path, f"{description} PNG"):
+                    if not open_pngs:
+                        job["opened"].add(key)
+                    elif self.open_local_path(path, f"{description} PNG"):
                         job["opened"].add(key)
 
             return_code = process.poll()
@@ -2147,10 +2315,13 @@ class CV3DMainWindow(QMainWindow):
                 except Exception:
                     continue
                 if old_signatures.get(key) != sig:
-                    if self.open_local_path(path, f"{description} PNG"):
+                    if not open_pngs:
+                        job["opened"].add(key)
+                    elif self.open_local_path(path, f"{description} PNG"):
                         job["opened"].add(key)
 
             timer.stop()
+            self._finish_process_timing(timing, exit_code=return_code)
             try:
                 out.close()
             except Exception:
@@ -2334,17 +2505,17 @@ class CV3DMainWindow(QMainWindow):
 
             button_specs = [
                 ("02_blender_cornea_extraction", "Extract cornea", self.launch_blender_cornea_extraction),
-                ("03a_local_height_calculation", "Calculate local heights", self.launch_r_03a_local_heights),
-                ("03a2_local_height_normalization", "Normalize local heights (optional)", self.launch_r_03a2_normalize_local_heights),
-                ("03b_local_height_thresholding", "Threshold local heights", self.launch_r_03b_local_height_thresholding),
-                ("03c_facet_candidate_condensation", "Condense facet candidates", self.launch_r_03c_facet_candidate_condensation),
-                ("04_blender_facet_check_landmarking", "Check facet positions", self.launch_blender_facet_position_checking),
-                ("04b_neighbour_selection", "Find neighbours", self.launch_r_04b_neighbours),
+                ("03a_local_height_calculation", "Local heights", self.launch_r_03a_local_heights),
+                ("03a2_local_height_normalization", "Normalize heights", self.launch_r_03a2_normalize_local_heights),
+                ("03b_local_height_thresholding", "Threshold heights", self.launch_r_03b_local_height_thresholding),
+                ("03c_facet_candidate_condensation", "Facet candidates", self.launch_r_03c_facet_candidate_condensation),
+                ("04_blender_facet_check_landmarking", "Check facets", self.launch_blender_facet_position_checking),
+                ("04b_neighbour_selection", "Neighbours", self.launch_r_04b_neighbours),
             ]
             for step, text, func in button_specs:
                 label = QLabel(f"{STEP_LABELS[step]}: ○ not started")
                 label.setWordWrap(True)
-                btn = QPushButton(f"{text}: {eye}")
+                btn = QPushButton(text)
                 btn.clicked.connect(lambda _, e=eye, s=step, f=func: f(e))
                 self.workflow_labels[eye][step] = label
                 self.workflow_buttons[eye][step] = btn
@@ -2361,39 +2532,39 @@ class CV3DMainWindow(QMainWindow):
             plot_header.setStyleSheet("font-weight: 600; margin-top: 2px;")
             v.addWidget(plot_header)
 
-            plot_btn = QPushButton(f"View local-height threshold plot: {eye}")
+            plot_btn = QPushButton("Threshold plot")
             plot_btn.clicked.connect(lambda _, e=eye: self.create_threshold_plot(e))
             self.threshold_plot_buttons[eye] = plot_btn
             v.addWidget(plot_btn)
 
-            raw_plot3d_btn = QPushButton(f"Plot raw local heights 3D (PNG + optional rgl): {eye}")
+            raw_plot3d_btn = QPushButton("Raw heights 3D")
             raw_plot3d_btn.clicked.connect(lambda _, e=eye: self.plot_raw_local_heights_3d(e))
             self.raw_local_height_3d_plot_buttons[eye] = raw_plot3d_btn
             v.addWidget(raw_plot3d_btn)
 
-            plot3d_btn = QPushButton(f"Plot normalized local heights 3D (PNG + optional rgl): {eye}")
+            plot3d_btn = QPushButton("Normalized heights 3D")
             plot3d_btn.clicked.connect(lambda _, e=eye: self.plot_local_heights_3d(e))
             self.local_height_3d_plot_buttons[eye] = plot3d_btn
             v.addWidget(plot3d_btn)
 
-            thresholded_plot3d_btn = QPushButton(f"Plot thresholded local-height points 3D: {eye}")
+            thresholded_plot3d_btn = QPushButton("Thresholded points 3D")
             thresholded_plot3d_btn.clicked.connect(lambda _, e=eye: self.plot_thresholded_local_heights_3d(e))
             if not hasattr(self, "thresholded_local_height_3d_plot_buttons"):
                 self.thresholded_local_height_3d_plot_buttons = {}
             self.thresholded_local_height_3d_plot_buttons[eye] = thresholded_plot3d_btn
             v.addWidget(thresholded_plot3d_btn)
 
-            facet_candidates_plot_btn = QPushButton(f"Plot facet candidates on local heights: {eye}")
+            facet_candidates_plot_btn = QPushButton("View facet candidates")
             facet_candidates_plot_btn.clicked.connect(lambda _, e=eye: self.plot_facet_points_on_local_heights(e, "facet_candidates"))
             self.facet_candidate_plot_buttons[eye] = facet_candidates_plot_btn
             v.addWidget(facet_candidates_plot_btn)
 
-            facet_positions_plot_btn = QPushButton(f"Plot facet positions on local heights: {eye}")
+            facet_positions_plot_btn = QPushButton("View facet positions")
             facet_positions_plot_btn.clicked.connect(lambda _, e=eye: self.plot_facet_points_on_local_heights(e, "facet_positions"))
             self.facet_position_plot_buttons[eye] = facet_positions_plot_btn
             v.addWidget(facet_positions_plot_btn)
 
-            neighbour_qc_btn = QPushButton(f"Neighbours QC: {eye}")
+            neighbour_qc_btn = QPushButton("Neighbours QC")
             neighbour_qc_btn.clicked.connect(lambda _, e=eye: self.plot_neighbours_qc(e))
             self.neighbour_qc_plot_buttons[eye] = neighbour_qc_btn
             v.addWidget(neighbour_qc_btn)
@@ -4024,7 +4195,13 @@ class CV3DMainWindow(QMainWindow):
                 batch_macro_path.write_text(batch_macro, encoding="utf-8")
                 cmd = [str(imagej_exe), "-macro", str(batch_macro_path)]
 
-            result = self.run_blocking_process(cmd, cwd=str(self.analysis_folder))
+            mesh_status_paths = [self.expected_mesh_status_for_target(target) for target in targets]
+            result = self.run_blocking_process(
+                cmd,
+                cwd=str(self.analysis_folder),
+                timing_json_paths=mesh_status_paths,
+                timing_scope=("imagej_mesh_single_target" if len(targets) == 1 else "shared_imagej_mesh_session"),
+            )
             exit_code = result.returncode
 
         except Exception as e:
@@ -4199,7 +4376,13 @@ class CV3DMainWindow(QMainWindow):
         cmd = [str(imagej_exe), "-macro", str(macro_path), arg]
 
         try:
-            result = self.run_blocking_process(cmd, cwd=str(raw_folder))
+            imagej_status_json = self.analysis_folder / f"01_{cv_id}_ImageJ_status.json"
+            result = self.run_blocking_process(
+                cmd,
+                cwd=str(raw_folder),
+                timing_json_paths=[imagej_status_json],
+                timing_scope="imagej_preprocessing_session",
+            )
             exit_code = result.returncode
         except Exception as e:
             s["state"] = "failed"
@@ -5505,7 +5688,7 @@ class CV3DMainWindow(QMainWindow):
                 f"Thresholded table: {thresholded_rel}\n"
                 f"Output PNG: {plot_rel}\n"
                 f"Open interactive rgl window: {open_rgl_window}\n\n"
-                "The PNG will open automatically when it is created.",
+                "The PNG will be saved. It opens automatically only when the interactive rgl window is not requested.",
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
             )
             if reply != QMessageBox.StandardButton.Ok:
@@ -5528,7 +5711,7 @@ class CV3DMainWindow(QMainWindow):
         if open_rgl_window:
             self.launch_background_plot_job(
                 cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
-                launch_path=launch_diag_path, png_paths=[plot_path], description="Thresholded local-height plot",
+                launch_path=launch_diag_path, png_paths=[plot_path], description="Thresholded local-height plot", open_pngs=False,
             )
             return
 
@@ -6799,7 +6982,7 @@ class CV3DMainWindow(QMainWindow):
             f"Input CSV: {input_rel}\n"
             f"Output PNG: {plot_rel}\n"
             f"Open interactive rgl window: {open_rgl_window}\n\n"
-            "The PNG will open automatically when it is created.",
+            "The PNG will be saved. It opens automatically only when the interactive rgl window is not requested.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -6822,7 +7005,7 @@ class CV3DMainWindow(QMainWindow):
         if open_rgl_window:
             self.launch_background_plot_job(
                 cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
-                launch_path=launch_diag_path, png_paths=[plot_path], description="Raw local-height plot",
+                launch_path=launch_diag_path, png_paths=[plot_path], description="Raw local-height plot", open_pngs=False,
             )
             return
 
@@ -6968,7 +7151,7 @@ class CV3DMainWindow(QMainWindow):
             f"Input CSV: {input_rel}\n"
             f"Output PNG: {plot_rel}\n"
             f"Open interactive rgl window: {open_rgl_window}\n\n"
-            "The PNG will open automatically when it is created.",
+            "The PNG will be saved. It opens automatically only when the interactive rgl window is not requested.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Ok:
@@ -6991,7 +7174,7 @@ class CV3DMainWindow(QMainWindow):
         if open_rgl_window:
             self.launch_background_plot_job(
                 cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
-                launch_path=launch_diag_path, png_paths=[plot_path], description="Normalized local-height plot",
+                launch_path=launch_diag_path, png_paths=[plot_path], description="Normalized local-height plot", open_pngs=False,
             )
             return
 
@@ -7178,7 +7361,7 @@ class CV3DMainWindow(QMainWindow):
                 self,
                 "Open interactive rgl window?",
                 "Create the PNG overlay only, or also keep an interactive rgl 3D window open for inspection?\n\n"
-                "The PNG is saved in the background either way. If you choose Yes, the rgl window will stay open independently; the CV3D UI remains usable.",
+                "The PNG is saved either way. If you choose Yes, only the rgl window opens; if you choose No, the PNG opens automatically.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.No
             )
@@ -7238,7 +7421,7 @@ class CV3DMainWindow(QMainWindow):
         if open_rgl_window:
             self.launch_background_plot_job(
                 cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
-                launch_path=launch_diag_path, png_paths=[plot_path], description=f"{label.capitalize()} overlay plot",
+                launch_path=launch_diag_path, png_paths=[plot_path], description=f"{label.capitalize()} overlay plot", open_pngs=False,
             )
             return
 
@@ -7555,7 +7738,7 @@ class CV3DMainWindow(QMainWindow):
         if open_rgl_window:
             self.launch_background_plot_job(
                 cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
-                launch_path=launch_path, png_paths=[plot_path], description=label,
+                launch_path=launch_path, png_paths=[plot_path], description=label, open_pngs=False,
             )
             return
 
@@ -7759,7 +7942,7 @@ class CV3DMainWindow(QMainWindow):
         if open_rgl_window:
             self.launch_background_plot_job(
                 cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
-                launch_path=launch_path, png_paths=[plot_path, reference_plot_path], description=label,
+                launch_path=launch_path, png_paths=[plot_path, reference_plot_path], description=label, open_pngs=False,
             )
             return
 
@@ -7928,7 +8111,7 @@ class CV3DMainWindow(QMainWindow):
         if open_rgl_window:
             self.launch_background_plot_job(
                 cmd, cwd=self.analysis_folder, stdout_path=stdout_path, stderr_path=stderr_path,
-                launch_path=launch_path, png_paths=[primary_plot_path], description=label,
+                launch_path=launch_path, png_paths=[primary_plot_path], description=label, open_pngs=False,
             )
             return
 

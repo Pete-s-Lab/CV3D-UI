@@ -19,7 +19,8 @@ header-includes:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
-This tutorial describes the current CV3D UI workflow from raw image-volume or 3D-scanning data to checked facet positions, head landmarks, optical metrics, corneal projections, mirroring, and analysis-ready export.
+
+This tutorial describes the current CV3D workflow for **CV3D UI 0.1.127** with **CV3D R package 0.1.18**, from raw image-volume or 3D-scanning data to checked facet positions, explicit neighbour selection, head landmarks, optical metrics, corneal projections, mirroring, quality control, and analysis-ready export.
 
 > **Scope**  
 > This guide focuses on the image-volume workflow using Fiji/ImageJ, Blender, R, and the CV3D R package. STL-source datasets are mentioned briefly, but the main tutorial assumes that the dataset starts from an image stack or volume.
@@ -46,6 +47,7 @@ Raw image volume
 -> R local-height thresholding
 -> R facet candidate condensation
 -> Blender facet position checking
+-> R edge-aware neighbour selection and QC (04B)
 -> Blender head landmarking
 -> R optical metrics (05A)
 -> R global coordinate rotation (05B)
@@ -109,7 +111,8 @@ CV3D_UI/
       |--- CV3D_R_03B_plot_threshold.R
       |--- CV3D_R_03C_candidates.R
       |--- CV3D_R_QC_facet_overlay.R
-      |--- CV3D_R_05A_metrics.R
+      |--- CV3D_R_04B_neighbours.R
+      |--- CV3D_R_05A_optics.R
       |--- CV3D_R_05A_QC_plots.R
       |--- CV3D_R_05B_align.R
       |--- CV3D_R_05B_QC_plots.R
@@ -117,13 +120,19 @@ CV3D_UI/
       |--- CV3D_R_05C_QC_plots.R
 ```
 
-Only `CV3D_app.py` needs to be started directly. The helper scripts are detected automatically when they remain in the `cv3d_helpers/` folder.
+On Windows, start the bundle with `Start CV3D.vbs`; `CV3D_app.py` remains the direct Python entry point. The helper scripts are detected automatically when they remain in the `cv3d_helpers/` folder.
 
 ---
 
 # Starting the app
 
-Open a terminal in the `CV3D_UI/` folder and run:
+On Windows, the normal entry point is:
+
+```text
+Start CV3D.vbs
+```
+
+Double-clicking the launcher searches for a suitable Python installation with PySide6 and starts CV3D without leaving a console window open. Alternatively, open a terminal in the `CV3D_UI/` folder and run:
 
 ```bash
 python CV3D_app.py
@@ -261,6 +270,9 @@ Save dataset metadata / eye inventory
 ```{r fig-07-dataset-setup, fig.cap="Dataset setup page with source information and eye inventory.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/dataset_setup.png")
 ```
+
+Throughout the workflow, unavailable actions are greyed out. **Hover over a disabled button to see why it is unavailable and which prerequisite is missing or stale.** The UI no longer repeats these blocking explanations as red text below the buttons.
+
 ---
 
 # ImageJ preprocessing
@@ -458,7 +470,7 @@ knitr::include_graphics("docs/images/local_heights_results.png")
 After Step 03A, click:
 
 ```text
-Normalize local heights (optional): eyeX
+Normalize heights
 ```
 
 Normalization is useful when the magnitude of raw facet relief varies across the eye. Within each spherical neighbourhood, CV3D clips the selected local-height values to configurable lower and upper quantiles (10th and 90th percentiles by default), rescales them to 0--1, and averages the values contributed by overlapping neighbourhoods. Points for which no valid local normalization can be calculated remain `NA` rather than receiving an artificial fallback value.
@@ -669,16 +681,16 @@ Available plots include:
 
 ```text
 View local-height threshold plot: eyeX
-Plot raw local heights 3D (PNG + optional rgl): eyeX
-Plot normalized local heights 3D (PNG + optional rgl): eyeX
-Plot thresholded local-height points 3D: eyeX
-Plot facet candidates on local heights: eyeX
-Plot facet positions on local heights: eyeX
+Raw heights 3D
+Normalized heights 3D
+Thresholded points 3D
+View facet candidates
+View facet positions
 ```
 
-Candidate/position overlay plots automatically choose the 2D projection with the largest spread. This avoids forcing a bad projection when the eye is tilted.
+Candidate/position overlay plots retain their dedicated local-height projection logic. Later 04B and 05A QC plots use CV3D's standardised face-on orientation so that neighbour, facet-value, and normal plots can be compared directly.
 
-The static PNGs are saved in the background and are not automatically opened. Where available, the app asks whether to also open an interactive `rgl` 3D window.
+Plot PNGs are always saved. If an optional interactive `rgl` 3D view is requested, **only the rgl window opens**; the corresponding PNG remains on disk and is not opened automatically. If the rgl option is left unchecked, the PNG opens automatically after it has been written. The R/rgl process runs separately so the CV3D UI remains responsive while the 3D window stays open.
 
 ```{r fig-21-qc-plot-buttons, fig.cap="Quality-control plotting buttons in the Eye Workflow page.", out.width="40%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/qc_plot_buttons.png")
@@ -723,6 +735,73 @@ knitr::include_graphics("docs/images/blender_facet_checking.png")
 ```{r fig-24-checked-facet-positions, fig.cap="Checked facet positions before export. The cornea mesh is coloured dark blue here to make the facet-position spheres easier to see.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/checked_facet_positions.png")
 ```
+
+---
+
+# Step 04B: Edge-aware neighbour selection
+
+After the checked Step-04 facet positions have been exported, click:
+
+```text
+Neighbours
+```
+
+Step 04B is a dedicated geometry/QC step. It determines which checked facet centres are treated as direct first-ring neighbours before facet size and optical properties are calculated. The neighbour graph is stored rather than being reconstructed silently inside 05A.
+
+## Choosing the edge angular-gap threshold
+
+The first part of 04B evaluates the full edge-aware neighbour method at six candidate edge thresholds:
+
+```text
+80, 85, 90, 95, 100, 105 degrees
+```
+
+For every candidate threshold, CV3D identifies edge facets from the largest empty angular sector around each facet in a local tangent plane and then runs the same final neighbour-link filtering that would be used if that threshold were selected. The resulting six-panel PNG is stored in the eye's `inspection/` folder and opened automatically.
+
+All six panels use the **same standardised CV3D face-on orientation**. Interior facets are shown in light grey. Detected edge facets are highlighted and coloured by their final retained neighbour count. This makes the threshold decision a direct visual check of both boundary detection and its effect on the neighbour graph.
+
+After the comparison PNG opens, the UI asks which threshold to use. Choose the threshold that best follows the true sampled eye boundary without unnecessarily classifying interior facets as edge facets.
+
+The comparison step also stores the continuous angular-gap values:
+
+```text
+eyeX/04B_CVxxxx_eyeX_edge_angular_gaps.csv
+eyeX/inspection/04B_CVxxxx_eyeX_edge_detection_threshold_comparison.png
+```
+
+## Final neighbour construction
+
+The selected threshold is then used by `CV3D::find_neighbours_edge_aware()`. The method:
+
+1. starts from reciprocal six-nearest-neighbour candidates;
+2. estimates a robust local core spacing as the median distance to the three closest facet centres;
+3. retains interior-interior links up to 1.5 times the larger endpoint core spacing;
+4. uses a stricter 1.4 factor for links touching a detected edge facet;
+5. applies an angular-shadow test only to detected edge facets, removing a farther near-collinear candidate when it is at least 1.15 times farther than the nearer competing neighbour; and
+6. does **not** refill boundary facets to a predetermined neighbour count.
+
+The shadow-angle cutoff is calibrated from the typical angular spacing of retained six-neighbour interior facets, using two-thirds of the median spacing constrained to 30--45 degrees. Links are removed reciprocally.
+
+Expected outputs include:
+
+```text
+eyeX/04B_CVxxxx_eyeX_neighbours.csv
+eyeX/04B_CVxxxx_eyeX_angle_shadow_removed_links.csv
+eyeX/json/04B_CVxxxx_eyeX_R_status.json
+```
+
+The main neighbour table records, for every facet, the retained neighbour IDs, neighbour count, edge classification, angular gap, selected threshold, local core spacing, shadow-removal count, and neighbour-method provenance.
+
+## Neighbours QC
+
+After 04B is complete, use:
+
+```text
+Neighbours QC: eyeX
+```
+
+This creates and automatically opens a two-panel face-on QC PNG. The left panel shows the retained neighbour graph and colours all facets by neighbour count. The right panel isolates the detected edge facets and colours them by their retained neighbour count. This is the main QC view for neighbour finding; neighbour-specific fields are intentionally not duplicated in the generic **Choose facet value** menu on the R Analysis tab.
+
 ---
 
 # Step 05: Head landmarking
@@ -772,6 +851,8 @@ Expected output:
 CVxxxx_CV3D/05_CVxxxx_landmarks.csv
 ```
 
+Head landmarks are required for 05B global alignment, but **05A itself is eye-specific and can run as soon as 04B has produced the stored neighbour graph**.
+
 ```{r fig-25-head-landmarking, fig.cap="Specimen-level head landmarking in Blender.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/head_landmarking.png")
 ```
@@ -780,9 +861,9 @@ knitr::include_graphics("docs/images/head_landmarking.png")
 
 # R Analysis after landmarking
 
-After Step 05, go to the **R Analysis** tab. This tab contains the downstream steps that turn checked facet positions and head landmarks into optical and spatial output tables.
+Go to the **R Analysis** tab after the eye-specific 04B neighbour graph is ready. This tab contains the downstream steps that turn checked facet positions, stored neighbours, facet normals, and head landmarks into optical and spatial output tables. 05A requires 04B; head landmarks are required from 05B onwards.
 
-The eye-wise sections show available steps for each eye. Steps calculated from original eye data use the normal completion symbol. Steps derived from a mirrored source eye are marked with:
+The eye-wise sections show available steps for each eye. If a button is disabled, hover over it to see the exact missing or stale prerequisite. Steps calculated from original eye data use the normal completion symbol. Steps derived from a mirrored source eye are marked with:
 
 \(\rightleftarrows\)
 
@@ -794,13 +875,30 @@ knitr::include_graphics("docs/images/r_analysis_page.png")
 
 ## Step 05A: Optical metrics
 
-Step 05A uses the checked facet positions from Step 04 to calculate facet-level optical descriptors. Run this step after the final facet-position CSV exists:
+Step 05A uses the checked facet positions from Step 04 together with the neighbour graph selected in Step 04B to calculate facet-level optical descriptors. The current UI therefore requires both:
 
 ```text
 CVxxxx_CV3D/eyeX/04_CVxxxx_eyeX_facet_positions.csv
+CVxxxx_CV3D/eyeX/04B_CVxxxx_eyeX_neighbours.csv
 ```
 
-Click the 05A button for the relevant eye. Facet neighbours are identified from **local tangent-plane geometry**: nearby facet centres are projected into a locally fitted surface plane and triangulated there, while candidate links are filtered using their three-dimensional spacing. This avoids assuming that the complete eye is spherical or that the eye centroid is a centre of curvature. Choose the local sampling lattice used for Snyder's calculations; **Hexagonal** is the default, with **Square** available as an alternative. The lattice changes Snyder's eye parameter and sampling frequency, while `acuity_cpd` remains $1/(2\Delta\phi)$ with $\Delta\phi$ in degrees. CV3D reports this as a local anatomical acuity estimate using the interommatidial-angle relationship used by Feller et al. (2020), rather than as a behavioural acuity measurement. The app writes the main optical output files into the eye folder:
+The 05A helper can still fall back to the older in-step `find_neighbours()` method for backward compatibility when used outside the current UI workflow, but the UI itself uses the explicit 04B graph.
+
+Click the 05A button for the relevant eye. Choose the local sampling lattice used for Snyder's calculations; **Hexagonal** is the default, with **Square** available as an alternative. The lattice changes Snyder's eye parameter and sampling frequency, while `acuity_cpd` remains $1/(2\Delta\phi)$ with $\Delta\phi$ in degrees. CV3D reports this as a local anatomical acuity estimate using the interommatidial-angle relationship used by Feller et al. (2020), rather than as a behavioural acuity measurement.
+
+05A also asks how facet surface normals should be estimated. The choices are:
+
+```text
+Original CV3D
+Envelope 1x
+Envelope 1.25x
+Envelope 1.5x
+Envelope 2x
+```
+
+The default is **Envelope 1.25x**. This is the current working default rather than a claim that 1.25x is optimal for every eye geometry. The envelope method reconstructs a regularised triangular surface directly from facet centres, smooths that envelope with five Taubin-style cycles, and calculates an area- and Gaussian-distance-weighted normal around each original facet. Its envelope topology is independent of the 04B optical-neighbour graph. The original estimator remains available for comparison and uses local triangles formed from the assigned neighbours followed by neighbour-normal averaging.
+
+The app writes the main optical output files into the eye folder:
 
 ```text
 eyeX/05A_CVxxxx_eyeX_optic_parameters.csv
@@ -820,9 +918,16 @@ sampling_lattice
 eye_parameter
 sampling_frequency_rad
 acuity_cpd
+facet_normal_method
+facet_normal_envelope_factor
+facet_normal_support_scale_um
+facet_normal_weight_cutoff_um
+facet_normal_support_face_count
 ```
 
-Use the 05A QC plot buttons to inspect optic parameters, facet normals, and selected labelled metrics. Optic-parameter, facet-normal, and labelled-metric QC plots use the standardised face-on view when facet normals are available. The facet-normal plot asks for normal length as a multiple of facet size; the default is 5 times facet size.
+Use **Optics overview panel** for the multi-metric overview and **Choose facet value** for individual facet-level maps. The generic selector intentionally excludes 04B neighbour/edge/shadow QC fields because those belong to the dedicated **Neighbours QC** plot on the Eye Workflow tab. **Normals** is available as a Choose facet value option and opens its own short options dialog for vector length and whether normal vectors are shown.
+
+All Choose facet value plots use `CV3D::view_eye_face_on()` so their stored 2D PNGs and interactive 3D views share the same standardised orientation as the corresponding workflow QC plots. Normal-direction colours retain the established CV3D direction colour mapping; changing the display orientation does not redefine the colours. If the optional rgl view is unchecked, the plot PNG opens automatically. If rgl is requested, only the rgl window opens; the PNG is still saved.
 
 ```{r fig-30-r-analysis-05a, fig.cap="05A optical metric outputs.", out.width="75%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/r_analysis_05a_outputs.png")
@@ -930,6 +1035,7 @@ Mirroring includes the available outputs from checked facet positions through co
 
 ```text
 04 facet positions
+04B neighbour outputs and neighbour QC provenance
 05A optical outputs
 05B global-coordinate outputs
 05C corneal projections
@@ -994,6 +1100,11 @@ eye_parameter
 sampling_frequency_rad
 sampling_lattice
 acuity_cpd
+facet_normal_method
+facet_normal_envelope_factor
+facet_normal_support_scale_um
+facet_normal_weight_cutoff_um
+facet_normal_support_face_count
 corn.proj.x
 corn.proj.y
 corn.proj.z
@@ -1008,7 +1119,7 @@ projection_center_mode
 projection_center_source
 ```
 
-The QC PDF report creates a compact specimen-level document with metadata, summary tables, optic-parameter barplots, and a corneal projection elevation/azimuth plot.
+The QC PDF report creates a compact specimen-level document with metadata, summary tables, optic-parameter summaries, corneal-projection QC, and the available **Choose facet value** maps. For each eye, all facet-value maps are regenerated in the canonical face-on orientation and placed together on a single report page; the normal-direction map is included when the facet-normal table is available. Report generation also refreshes the analysis-ready tables, and the completed PDF opens automatically. Unexpected report-generation errors are shown in a GUI error dialog rather than failing silently.
 
 ```{r fig-35-results-export, fig.cap="Results / Export page with readiness, table export, PDF report, ZIP export, and final export folder.", out.width="66%", fig.align="center", fig.pos="H"}
 knitr::include_graphics("docs/images/results_export_page.png")
@@ -1055,6 +1166,9 @@ CV0001_CV3D/
 |  |--- 03_CV0001_eye1_local_height_thresholded.csv
 |  |--- 03_CV0001_eye1_facet_candidates.csv
 |  |--- 04_CV0001_eye1_facet_positions.csv
+|  |--- 04B_CV0001_eye1_edge_angular_gaps.csv
+|  |--- 04B_CV0001_eye1_neighbours.csv
+|  |--- 04B_CV0001_eye1_angle_shadow_removed_links.csv
 |  |--- 05A_CV0001_eye1_optic_parameters.csv
 |  |--- 05A_CV0001_eye1_facet_normals.csv
 |  |--- 05A_CV0001_eye1_facet_sizes.csv
@@ -1075,6 +1189,8 @@ CV0001_CV3D/
 ```
 
 Task metadata and logs are stored in `json/` and `logs/` subfolders.
+
+Run-level task/status JSON records include `process_started_at`, `process_finished_at`, `process_runtime_seconds`, and `process_exit_code` for runtime analysis. ISO timestamps include the local UTC offset. For multi-target Fiji mesh extraction, `process_timing_scope` records that the times describe the shared Fiji session rather than an individual target.
 
 ---
 
@@ -1134,6 +1250,22 @@ Facet position plotting requires completed Step 04 output:
 CVxxxx_CV3D/eyeX/04_CVxxxx_eyeX_facet_positions.csv
 ```
 
+## 04B neighbour selection is disabled
+
+04B requires the checked Step-04 facet-position file. Hover over the disabled button to see the current blocking reason. The required file is:
+
+```text
+CVxxxx_CV3D/eyeX/04_CVxxxx_eyeX_facet_positions.csv
+```
+
+## 05A is disabled after Step 04
+
+In the current UI, 05A requires the dedicated 04B neighbour graph. Run **Find neighbours** on the Eye Workflow tab and choose an edge angular-gap threshold first. The required neighbour file is:
+
+```text
+CVxxxx_CV3D/eyeX/04B_CVxxxx_eyeX_neighbours.csv
+```
+
 ## R step fails immediately
 
 Check:
@@ -1150,7 +1282,7 @@ Check:
 Check that upstream outputs exist. In particular:
 
 ```text
-05A requires eyeX/04_CVxxxx_eyeX_facet_positions.csv
+05A requires eyeX/04_CVxxxx_eyeX_facet_positions.csv and eyeX/04B_CVxxxx_eyeX_neighbours.csv
 05B requires 05_CVxxxx_landmarks.csv and 05A outputs
 05C requires 05B global-coordinate outputs
 ```
@@ -1187,7 +1319,7 @@ Use **Open final export folder** in the Results / Export tab.
 
 ## QC PDF report does not open or is empty
 
-First generate the analysis-ready tables, then generate the QC PDF report. If the source tables contain no valid acuity_cpd or elevation/azimuth values, the report can still be generated, but the corneal projection plot may be empty or labelled as unavailable.
+The QC PDF action refreshes the analysis-ready tables automatically. If generation fails, the UI now shows the underlying error in a dialog. Check the eye-specific R logs if generation of the face-on 05A facet-value maps fails. If the source tables contain no valid `acuity_cpd` or elevation/azimuth values, the report can still be generated, but the corresponding plot may be empty or labelled as unavailable.
 
 ---
 
@@ -1219,6 +1351,14 @@ First generate the analysis-ready tables, then generate the QC PDF report. If th
 - `eyeX/04_CVxxxx_eyeX_facet_positions.csv` - Manually checked final facet positions.
 - `05_CVxxxx_head_landmarks.blend` - Specimen-level Blender landmarking file.
 - `05_CVxxxx_landmarks.csv` - Head landmarks: anterior, posterior, left, and right.
+
+## R Step 04B outputs
+
+- `eyeX/04B_CVxxxx_eyeX_edge_angular_gaps.csv` - Continuous largest local angular gap for every checked facet, used for threshold comparison.
+- `eyeX/inspection/04B_CVxxxx_eyeX_edge_detection_threshold_comparison.png` - Six-panel face-on comparison for 80--105 degree edge thresholds.
+- `eyeX/04B_CVxxxx_eyeX_neighbours.csv` - Final stored edge-aware neighbour graph and per-facet QC/provenance fields.
+- `eyeX/04B_CVxxxx_eyeX_angle_shadow_removed_links.csv` - Links removed by the edge-only angular-shadow test.
+- `eyeX/inspection/04B_CVxxxx_eyeX_neighbours_QC.png` - Two-panel face-on QC plot of the retained graph and detected edge facets.
 
 ## R Step 05A outputs
 
@@ -1256,4 +1396,4 @@ First generate the analysis-ready tables, then generate the QC PDF report. If th
 
 # End of tutorial
 
-This tutorial covers the workflow through analysis-ready export files and report generation. Later optional biological analyses, such as field-of-view summaries or regional visual specialization, are treated as subsequent downstream analyses rather than core pipeline output.
+This tutorial covers the workflow through explicit neighbour selection, optical analysis, face-on quality control, analysis-ready export files, and report generation. Later optional biological analyses, such as field-of-view summaries or regional visual specialisation, are treated as subsequent downstream analyses rather than core pipeline output.
